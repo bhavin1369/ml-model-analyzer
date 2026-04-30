@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ML Model Workbench</title>
+    <meta name="description" content="Train and compare ML regression models">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+    <style>
+        *{box-sizing:border-box;margin:0;padding:0}
+        body{font-family:'Inter',sans-serif;background:#f5f6f8;color:#1a1a2e;min-height:100vh}
+        .navbar{background:#fff;border-bottom:1px solid #e2e5ea;padding:12px 24px;display:flex;align-items:center;position:sticky;top:0;z-index:100}
+        .navbar-brand{font-weight:700;font-size:1.15rem;color:#1a1a2e;display:flex;align-items:center;gap:8px}
+        .navbar-brand i{color:#2563eb;font-size:1.2rem}
+        .app-layout{display:flex;min-height:calc(100vh - 49px)}
+        .sidebar{width:280px;background:#fff;border-right:1px solid #e2e5ea;padding:20px;overflow-y:auto;flex-shrink:0}
+        .main-content{flex:1;padding:24px;overflow-y:auto}
+        .card{background:#fff;border:1px solid #e2e5ea;border-radius:8px;padding:20px;margin-bottom:16px}
+        .card-title{font-size:.8rem;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
+        .upload-area{border:2px dashed #d1d5db;border-radius:8px;padding:24px;text-align:center;cursor:pointer;transition:border-color .2s}
+        .upload-area:hover{border-color:#2563eb}
+        .upload-area i{font-size:2rem;color:#9ca3af;display:block;margin-bottom:8px}
+        .upload-area p{color:#6b7280;font-size:.85rem;margin:0}
+        .upload-area .upload-title{font-weight:600;color:#374151;font-size:.9rem;margin-bottom:2px}
+        .file-info{display:flex;align-items:center;gap:10px;padding:10px 12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;margin-top:10px;font-size:.82rem}
+        .file-info i{color:#16a34a;font-size:1rem}
+        .file-info .fname{font-weight:600;color:#15803d}
+        .file-info .fdetail{color:#4ade80;font-size:.75rem}
+        .model-item{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:5px;font-size:.85rem;cursor:pointer;transition:background .15s}
+        .model-item:hover{background:#f8fafc}
+        .model-item input[type="checkbox"]{width:16px;height:16px;accent-color:#2563eb;cursor:pointer}
+        .model-item label{cursor:pointer;color:#374151;flex:1}
+        .model-desc{font-size:.7rem;color:#9ca3af;display:block;margin-top:1px}
+        .btn-row{display:flex;gap:6px;margin-bottom:10px}
+        .btn-sm{padding:5px 12px;font-size:.75rem;border:1px solid #d1d5db;background:#fff;border-radius:5px;cursor:pointer;color:#374151;transition:all .15s}
+        .btn-sm:hover{background:#f1f5f9;border-color:#94a3b8}
+        .btn-primary{width:100%;padding:12px;background:#2563eb;color:#fff;border:none;border-radius:6px;font-size:.9rem;font-weight:600;cursor:pointer;transition:background .2s;display:flex;align-items:center;justify-content:center;gap:8px}
+        .btn-primary:hover{background:#1d4ed8}
+        .btn-primary:disabled{background:#93c5fd;cursor:not-allowed}
+        .stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+        .stat-card{background:#fff;border:1px solid #e2e5ea;border-radius:8px;padding:16px}
+        .stat-value{font-size:1.5rem;font-weight:700;color:#1a1a2e}
+        .stat-label{font-size:.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
+        .stat-card.best .stat-value{color:#2563eb}
+        .tabs{display:flex;gap:0;border-bottom:2px solid #e2e5ea;margin-bottom:20px}
+        .tab-btn{padding:10px 20px;background:none;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;font-size:.85rem;font-weight:500;color:#64748b;cursor:pointer;transition:all .2s}
+        .tab-btn:hover{color:#1a1a2e}
+        .tab-btn.active{color:#2563eb;border-bottom-color:#2563eb;font-weight:600}
+        .tab-panel{display:none}.tab-panel.active{display:block}
+        .chart-box{border:1px solid #e2e5ea;border-radius:8px;overflow:hidden;background:#fff}
+        .data-table{width:100%;border-collapse:collapse;font-size:.85rem}
+        .data-table thead th{text-align:left;padding:10px 14px;background:#f8fafc;color:#64748b;font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.3px;border-bottom:1px solid #e2e5ea}
+        .data-table tbody td{padding:10px 14px;border-bottom:1px solid #f1f5f9;color:#374151}
+        .data-table tbody tr:hover{background:#f8fafc}
+        .data-table tbody tr:first-child{background:#eff6ff}
+        .data-table tbody tr:first-child td{font-weight:600;color:#2563eb}
+        .welcome{text-align:center;padding:60px 20px}
+        .welcome i{font-size:3rem;color:#d1d5db;margin-bottom:16px;display:block}
+        .welcome h2{font-weight:700;color:#1a1a2e;font-size:1.3rem;margin-bottom:8px}
+        .welcome p{color:#6b7280;font-size:.9rem;max-width:440px;margin:0 auto;line-height:1.6}
+        .steps{display:flex;gap:16px;justify-content:center;margin-top:24px}
+        .step{text-align:center;padding:16px 20px;background:#f8fafc;border-radius:8px;width:140px}
+        .step-num{font-size:1.3rem;font-weight:700;color:#2563eb}
+        .step-text{font-size:.78rem;color:#6b7280;margin-top:4px}
+        #loading-overlay{position:fixed;inset:0;background:rgba(255,255,255,0.85);z-index:9999;display:none;justify-content:center;align-items:center;flex-direction:column;gap:12px}
+        #loading-overlay.show{display:flex}
+        .spinner{width:32px;height:32px;border:3px solid #e2e5ea;border-top-color:#2563eb;border-radius:50%;animation:spin .7s linear infinite}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        .status-bar{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #e2e5ea;padding:6px 24px;font-size:.78rem;color:#64748b;display:flex;align-items:center;gap:8px}
+        .status-dot{width:6px;height:6px;border-radius:50%;background:#22c55e}
+        /* Model filter bar for charts */
+        .model-filter{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:14px;padding:10px 14px;background:#f8fafc;border:1px solid #e2e5ea;border-radius:6px}
+        .model-filter label{font-size:.78rem;font-weight:500;color:#64748b;margin-right:4px}
+        .filter-chip{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border:1px solid #d1d5db;border-radius:4px;font-size:.75rem;cursor:pointer;background:#fff;color:#374151;transition:all .15s;user-select:none}
+        .filter-chip:hover{border-color:#2563eb;background:#eff6ff}
+        .filter-chip.active{background:#2563eb;color:#fff;border-color:#2563eb}
+        .filter-chip input{display:none}
+        .combo-model{font-weight:600;font-size:.85rem;color:#374151;margin-bottom:6px;margin-top:14px}
+        @media(max-width:768px){
+            .app-layout{flex-direction:column}
+            .sidebar{width:100%;border-right:none;border-bottom:1px solid #e2e5ea}
+            .stats-row{grid-template-columns:repeat(2,1fr)}
+            .steps{flex-wrap:wrap}
+        }
+    </style>
+</head>
+<body>
+    <div id="loading-overlay">
+        <div class="spinner"></div>
+        <div style="font-weight:600;color:#1a1a2e">Training models...</div>
+        <div style="font-size:.82rem;color:#6b7280" id="loading-msg">Please wait</div>
+    </div>
+
+    <nav class="navbar">
+        <div class="navbar-brand"><i class="bi bi-cpu"></i> ML Model Workbench</div>
+    </nav>
+
+    <div class="app-layout">
+        <aside class="sidebar">
+            <div style="margin-bottom:20px">
+                <div class="card-title">Dataset</div>
+                <div class="upload-area" id="upload-zone" onclick="document.getElementById('file-input').click()">
+                    <i class="bi bi-file-earmark-arrow-up"></i>
+                    <div class="upload-title">Upload CSV file</div>
+                    <p>Click or drag file here</p>
+                </div>
+                <input type="file" id="file-input" accept=".csv" style="display:none" onchange="uploadFile(this)">
+                <div id="dataset-info" style="display:none">
+                    <div class="file-info">
+                        <i class="bi bi-check-circle-fill"></i>
+                        <div><div class="fname" id="ds-name"></div><div class="fdetail" id="ds-details"></div></div>
+                    </div>
+                </div>
+            </div>
+            <div style="margin-bottom:20px">
+                <div class="card-title">Models</div>
+                <div class="btn-row">
+                    <button class="btn-sm" onclick="toggleAll(true)">Select All</button>
+                    <button class="btn-sm" onclick="toggleAll(false)">Clear</button>
+                </div>
+                <div id="model-list">
+                    {% for model in models %}
+                    <div class="model-item">
+                        <input type="checkbox" id="model-{{ loop.index }}" value="{{ model }}" checked>
+                        <label for="model-{{ loop.index }}">{{ model }}<span class="model-desc">{{ model_info.get(model, '') }}</span></label>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            <button class="btn-primary" id="train-btn" onclick="trainModels()" disabled>
+                <i class="bi bi-play-fill"></i> Train Models
+            </button>
+        </aside>
+
+        <main class="main-content" style="padding-bottom:50px">
+            <div class="stats-row" id="summary-cards" style="display:none">
+                <div class="stat-card best"><div class="stat-value" id="best-r2">—</div><div class="stat-label">Best R² Score</div></div>
+                <div class="stat-card"><div class="stat-value" id="best-rmse">—</div><div class="stat-label">Best RMSE</div></div>
+                <div class="stat-card"><div class="stat-value" id="best-model-name">—</div><div class="stat-label">Best Model</div></div>
+                <div class="stat-card"><div class="stat-value" id="models-trained">—</div><div class="stat-label">Models Trained</div></div>
+            </div>
+
+            <div id="results-area" style="display:none">
+                <div class="card" style="padding:0;overflow:hidden">
+                    <div class="tabs" style="padding:0 16px">
+                        <button class="tab-btn active" onclick="switchTab('comparison',this)">Comparison</button>
+                        <button class="tab-btn" onclick="switchTab('predictions',this)">Predicted vs Actual</button>
+                        <button class="tab-btn" onclick="switchTab('combinations',this)">Top 10 Combinations</button>
+                        <button class="tab-btn" onclick="switchTab('table',this)">Results Table</button>
+                    </div>
+                    <div style="padding:16px">
+                        <!-- Comparison -->
+                        <div class="tab-panel active" id="tab-comparison">
+                            <div class="chart-box" id="chart-comparison" style="min-height:400px"></div>
+                        </div>
+
+                        <!-- Predictions with model filter -->
+                        <div class="tab-panel" id="tab-predictions">
+                            <div class="model-filter" id="pred-filter">
+                                <label>View:</label>
+                            </div>
+                            <div id="pred-charts-container"></div>
+                        </div>
+
+                        <!-- Combinations with model filter -->
+                        <div class="tab-panel" id="tab-combinations">
+                            <div class="model-filter" id="combo-filter">
+                                <label>View:</label>
+                            </div>
+                            <div id="combo-charts-container"></div>
+                            <div id="combo-details" style="margin-top:12px"></div>
+                        </div>
+
+                        <!-- Table -->
+                        <div class="tab-panel" id="tab-table">
+                            <div id="results-table-container"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="welcome-msg" class="card">
+                <div class="welcome">
+                    <i class="bi bi-bar-chart-line"></i>
+                    <h2>Get Started</h2>
+                    <p>Upload a CSV dataset, select the models you want to compare, and click <strong>Train Models</strong> to see results.</p>
+                    <div class="steps">
+                        <div class="step"><div class="step-num">1</div><div class="step-text">Upload CSV</div></div>
+                        <div class="step"><div class="step-num">2</div><div class="step-text">Pick Models</div></div>
+                        <div class="step"><div class="step-num">3</div><div class="step-text">View Results</div></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <div class="status-bar">
+        <div class="status-dot"></div>
+        <span id="status-text">Ready</span>
+    </div>
+
+    <script>
+        let currentFilepath=null;
+        let trainData=null; // store full response
+
+        // Drag & drop
+        const uz=document.getElementById('upload-zone');
+        uz.addEventListener('dragover',e=>{e.preventDefault();uz.style.borderColor='#2563eb'});
+        uz.addEventListener('dragleave',()=>uz.style.borderColor='#d1d5db');
+        uz.addEventListener('drop',e=>{e.preventDefault();uz.style.borderColor='#d1d5db';if(e.dataTransfer.files.length){document.getElementById('file-input').files=e.dataTransfer.files;uploadFile(document.getElementById('file-input'));}});
+
+        async function uploadFile(input){
+            const file=input.files[0];if(!file)return;
+            const fd=new FormData();fd.append('file',file);
+            setStatus('Uploading...');
+            try{
+                const res=await fetch('/api/upload',{method:'POST',body:fd});
+                const data=await res.json();
+                if(data.error){alert(data.error);setStatus('Upload failed');return;}
+                currentFilepath=data.filepath;
+                document.getElementById('ds-name').textContent=data.filename;
+                document.getElementById('ds-details').textContent=data.rows+' rows · '+data.columns+' columns · Target: '+data.target;
+                document.getElementById('dataset-info').style.display='block';
+                document.getElementById('train-btn').disabled=false;
+                setStatus('Dataset loaded: '+data.filename);
+            }catch(e){alert('Upload failed');setStatus('Error');}
+        }
+
+        function toggleAll(state){document.querySelectorAll('#model-list input').forEach(cb=>cb.checked=state);}
+
+        async function trainModels(){
+            const models=Array.from(document.querySelectorAll('#model-list input:checked')).map(cb=>cb.value);
+            if(!models.length){alert('Select at least one model');return;}
+            if(!currentFilepath){alert('Upload a dataset first');return;}
+            const overlay=document.getElementById('loading-overlay');
+            overlay.classList.add('show');
+            document.getElementById('loading-msg').textContent='Training '+models.length+' model(s)...';
+            document.getElementById('train-btn').disabled=true;
+            setStatus('Training...');
+            try{
+                const res=await fetch('/api/train',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filepath:currentFilepath,models:models,test_size:0.2})});
+                const data=await res.json();
+                if(data.error){alert(data.error);setStatus('Training failed');return;}
+                trainData=data;
+                renderResults(data);
+                setStatus(data.summary);
+            }catch(e){alert('Training failed');setStatus('Error');}
+            finally{overlay.classList.remove('show');document.getElementById('train-btn').disabled=false;}
+        }
+
+        function renderResults(data){
+            document.getElementById('welcome-msg').style.display='none';
+            document.getElementById('results-area').style.display='block';
+            document.getElementById('summary-cards').style.display='grid';
+            const best=data.results_table[0];
+            document.getElementById('best-r2').textContent=(best.R2*100).toFixed(2)+'%';
+            document.getElementById('best-rmse').textContent=best.RMSE.toFixed(4);
+            document.getElementById('best-model-name').textContent=best.Model;
+            document.getElementById('models-trained').textContent=data.results_table.length;
+
+            // Comparison chart
+            const cfg={responsive:true,displayModeBar:false};
+            try{const c=JSON.parse(data.comparison_chart);Plotly.newPlot('chart-comparison',c.data,c.layout,cfg);}catch(e){}
+
+            // Build model filter chips for predictions
+            const predModels=Object.keys(data.prediction_chart||{});
+            buildFilterChips('pred-filter',predModels,()=>renderPredCharts(data));
+            renderPredCharts(data);
+
+            // Build model filter chips for combinations
+            const comboModels=Object.keys(data.combination_chart||{});
+            buildFilterChips('combo-filter',comboModels,()=>renderComboCharts(data));
+            renderComboCharts(data);
+
+            // Table
+            let html='<table class="data-table"><thead><tr><th>#</th><th>Model</th><th>R² Score</th><th>RMSE</th><th>MSE</th></tr></thead><tbody>';
+            data.results_table.forEach((r,i)=>{html+='<tr><td>'+(i+1)+'</td><td>'+r.Model+'</td><td>'+(r.R2*100).toFixed(2)+'%</td><td>'+r.RMSE.toFixed(6)+'</td><td>'+r.MSE.toFixed(6)+'</td></tr>';});
+            html+='</tbody></table>';
+            document.getElementById('results-table-container').innerHTML=html;
+
+            // Combo details table
+            let cd='';
+            for(const[model,combos]of Object.entries(data.combo_details||{})){
+                cd+='<div class="combo-model">'+model+' — Top 10</div><table class="data-table"><thead><tr>';
+                const cols=Object.keys(combos[0]||{});
+                cols.forEach(c=>cd+='<th>'+c+'</th>');
+                cd+='</tr></thead><tbody>';
+                combos.forEach(row=>{cd+='<tr>';cols.forEach(c=>{const v=row[c];cd+='<td>'+(typeof v==='number'?v.toFixed(4):v)+'</td>';});cd+='</tr>';});
+                cd+='</tbody></table>';
+            }
+            document.getElementById('combo-details').innerHTML=cd;
+        }
+
+        // Build filter chips (All + each model)
+        function buildFilterChips(containerId,modelNames,onChange){
+            const container=document.getElementById(containerId);
+            container.innerHTML='<label>View:</label>';
+
+            // "All Models" chip
+            const allChip=document.createElement('span');
+            allChip.className='filter-chip active';
+            allChip.textContent='All Models';
+            allChip.dataset.model='__all__';
+            allChip.onclick=function(){
+                const isActive=this.classList.contains('active');
+                container.querySelectorAll('.filter-chip').forEach(c=>{
+                    if(c.dataset.model==='__all__') c.classList.add('active');
+                    else{if(isActive) c.classList.remove('active'); else c.classList.add('active');}
+                });
+                if(!isActive) this.classList.add('active');
+                onChange();
+            };
+            container.appendChild(allChip);
+
+            modelNames.forEach(name=>{
+                const chip=document.createElement('span');
+                chip.className='filter-chip active';
+                chip.textContent=name;
+                chip.dataset.model=name;
+                chip.onclick=function(){
+                    this.classList.toggle('active');
+                    // Check if all are active
+                    const allActive=modelNames.every(n=>container.querySelector('[data-model="'+n+'"]').classList.contains('active'));
+                    container.querySelector('[data-model="__all__"]').classList.toggle('active',allActive);
+                    onChange();
+                };
+                container.appendChild(chip);
+            });
+        }
+
+        function getActiveModels(containerId){
+            const chips=document.querySelectorAll('#'+containerId+' .filter-chip.active');
+            const models=[];
+            chips.forEach(c=>{if(c.dataset.model!=='__all__')models.push(c.dataset.model);});
+            return models;
+        }
+
+        function renderPredCharts(data){
+            const container=document.getElementById('pred-charts-container');
+            const active=getActiveModels('pred-filter');
+            container.innerHTML='';
+            const cfg={responsive:true,displayModeBar:true,modeBarButtonsToRemove:['lasso2d','select2d'],displaylogo:false};
+
+            active.forEach(name=>{
+                const chartJson=data.prediction_chart[name];
+                if(!chartJson)return;
+                const div=document.createElement('div');
+                div.className='chart-box';
+                div.style.marginBottom='16px';
+                container.appendChild(div);
+                try{
+                    const fig=JSON.parse(chartJson);
+                    Plotly.newPlot(div,fig.data,fig.layout,cfg);
+                }catch(e){}
+            });
+            if(!active.length) container.innerHTML='<p style="text-align:center;color:#64748b;padding:40px">Select a model to view</p>';
+        }
+
+        function renderComboCharts(data){
+            const container=document.getElementById('combo-charts-container');
+            const active=getActiveModels('combo-filter');
+            container.innerHTML='';
+            const cfg={responsive:true,displayModeBar:true,modeBarButtonsToRemove:['lasso2d','select2d'],displaylogo:false};
+
+            active.forEach(name=>{
+                const chartJson=data.combination_chart[name];
+                if(!chartJson)return;
+                const div=document.createElement('div');
+                div.className='chart-box';
+                div.style.marginBottom='16px';
+                container.appendChild(div);
+                try{
+                    const fig=JSON.parse(chartJson);
+                    Plotly.newPlot(div,fig.data,fig.layout,cfg);
+                }catch(e){}
+            });
+            if(!active.length) container.innerHTML='<p style="text-align:center;color:#64748b;padding:40px">Select a model to view</p>';
+        }
+
+        function switchTab(id,btn){
+            document.querySelectorAll('.tab-panel').forEach(t=>t.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+            document.getElementById('tab-'+id).classList.add('active');
+            btn.classList.add('active');
+            // Resize plotly charts in active tab
+            setTimeout(()=>{
+                document.querySelectorAll('#tab-'+id+' .chart-box').forEach(el=>{
+                    if(el.data)Plotly.Plots.resize(el);
+                });
+            },50);
+        }
+
+        function setStatus(msg){document.getElementById('status-text').textContent=msg;}
+    </script>
+</body>
+</html>
