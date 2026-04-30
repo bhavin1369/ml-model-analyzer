@@ -6,6 +6,7 @@ Deployable on Render free tier.
 
 import io
 import os
+import gc
 import math
 import json
 import base64
@@ -81,15 +82,15 @@ def build_lightgbm_regressor():
 MODEL_BUILDERS = {
     "Linear Regression": lambda: LinearRegression(),
     "Decision Tree": lambda: DecisionTreeRegressor(random_state=RANDOM_STATE),
-    "Random Forest": lambda: RandomForestRegressor(n_estimators=250, random_state=RANDOM_STATE),
+    "Random Forest": lambda: RandomForestRegressor(n_estimators=100, random_state=RANDOM_STATE, n_jobs=1),
     "Bagging": lambda: BaggingRegressor(
         estimator=DecisionTreeRegressor(random_state=RANDOM_STATE),
-        n_estimators=250, random_state=RANDOM_STATE, n_jobs=-1,
+        n_estimators=100, random_state=RANDOM_STATE, n_jobs=1,
     ),
     "Gradient Boosting": lambda: GradientBoostingRegressor(random_state=RANDOM_STATE),
     "KNN": lambda: KNeighborsRegressor(n_neighbors=5),
     "SVR": lambda: SVR(kernel="rbf", C=50, epsilon=0.02),
-    "Extra Trees": lambda: ExtraTreesRegressor(n_estimators=250, random_state=RANDOM_STATE),
+    "Extra Trees": lambda: ExtraTreesRegressor(n_estimators=100, random_state=RANDOM_STATE, n_jobs=1),
     "AdaBoost": lambda: AdaBoostRegressor(random_state=RANDOM_STATE),
 }
 
@@ -190,13 +191,18 @@ def train_models(df, selected_models, test_size=0.2):
         })
         predictions[model_name] = pred_df
 
-        # Top 10 combinations
+        # Top 10 combinations (limit to 500 unique rows to save memory)
         combo_features = X.drop_duplicates().reset_index(drop=True)
+        if len(combo_features) > 500:
+            combo_features = combo_features.sample(500, random_state=RANDOM_STATE).reset_index(drop=True)
         combo_preds = pipeline.predict(combo_features)
         combo_df = combo_features.copy()
         combo_df["Predicted"] = combo_preds
         combo_df = combo_df.sort_values("Predicted", ascending=False).head(10).reset_index(drop=True)
         top_combinations[model_name] = combo_df
+
+        del pipeline, model, y_pred
+        gc.collect()
 
     metrics_df = pd.DataFrame(records).sort_values("R2", ascending=False).reset_index(drop=True)
     return metrics_df, predictions, top_combinations, feature_cols
