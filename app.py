@@ -49,6 +49,9 @@ UPLOAD_FOLDER = Path("uploads")
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 
 RANDOM_STATE = 42
+DEFAULT_RATIO_LIST_TEXT = "80,70,60"
+PREDICTION_PLOT_MIN = 0.0
+PREDICTION_PLOT_MAX = 1.0
 
 
 # ── Model Builders ─────────────────────────────────────────────────────────────
@@ -143,11 +146,101 @@ def format_feature_value(value):
     return str(value)
 
 
-def train_models(df, selected_models, test_size=0.2):
+def get_features_and_target(df: pd.DataFrame, target_col: str | None = None):
+    if not target_col or target_col not in df.columns:
+        target_col = str(df.columns[-1])
+    feature_cols = [col for col in df.columns if col != target_col]
+    X = df[feature_cols]
+    y = df[target_col]
+    return X, y, target_col, feature_cols
+
+
+def parse_train_ratio_list(ratio_text: str | None, primary_train_size: float | None = None):
+    default_ratios = [0.8, 0.7, 0.6]
+    ratios = list(default_ratios)
+
+    text = (ratio_text or "").strip()
+    if text:
+        for token in [part.strip() for part in text.split(",") if part.strip()]:
+            numeric = float(token)
+            percent = numeric * 100.0 if numeric <= 1.0 else numeric
+            if percent <= 0 or percent >= 100:
+                raise ValueError("Each train ratio must be greater than 0 and less than 100.")
+            ratios.append(round(percent / 100.0, 4))
+
+    if primary_train_size is not None:
+        ratios.insert(0, round(float(primary_train_size), 4))
+
+    return list(dict.fromkeys(ratios))
+
+
+def ratio_label(train_size: float):
+    train_pct = int(round(train_size * 100))
+    test_pct = 100 - train_pct
+    return f"{train_pct}-{test_pct}"
+
+
+def compute_dataset_top10(df: pd.DataFrame, target_col: str | None = None):
+    _, _, resolved_target_col, feature_cols = get_features_and_target(df, target_col)
+    top10 = df.nlargest(10, resolved_target_col).reset_index(drop=True)
+    result_rows = []
+    for idx, (_, row) in enumerate(top10.iterrows(), start=1):
+        entry = {"Rank": f"C{idx}", "Actual": float(row[resolved_target_col])}
+        for col in feature_cols:
+            value = row[col]
+            if isinstance(value, (np.integer, int)):
+                entry[col] = int(value)
+            elif isinstance(value, (np.floating, float)):
+                entry[col] = float(value)
+            else:
+                entry[col] = str(value)
+        result_rows.append(entry)
+    return result_rows, resolved_target_col, feature_cols
+
+
+def run_ratio_analysis(X, y, model_name: str, train_sizes: list[float]):
+    rows = []
+    builder = MODEL_BUILDERS.get(model_name)
+    if builder is None:
+        return pd.DataFrame(rows)
+
+    for train_size in train_sizes:
+        model = builder()
+        if model is None:
+            continue
+        pipeline = Pipeline([
+            ("scaler", StandardScaler()),
+            ("model", model),
+        ])
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X,
+            y,
+            test_size=(1.0 - float(train_size)),
+            random_state=RANDOM_STATE,
+        )
+        pipeline.fit(X_train, y_train)
+        y_pred = pipeline.predict(X_test)
+
+        mse = mean_squared_error(y_test, y_pred)
+        rows.append({
+            "Ratio": ratio_label(float(train_size)),
+            "TrainSize": float(train_size),
+            "R2": float(r2_score(y_test, y_pred)),
+            "RMSE": float(np.sqrt(mse)),
+        })
+
+        del pipeline, model, y_pred
+        gc.collect()
+
+    if not rows:
+        return pd.DataFrame(rows)
+    return pd.DataFrame(rows)
+
+
+def train_models(df, selected_models, test_size=0.2, target_col=None):
     """Train selected models and return metrics, predictions, and top combinations."""
-    X = df.iloc[:, :-1]
-    y = df.iloc[:, -1]
-    feature_cols = X.columns.tolist()
+    X, y, resolved_target_col, feature_cols = get_features_and_target(df, target_col)
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, random_state=RANDOM_STATE,
@@ -205,7 +298,7 @@ def train_models(df, selected_models, test_size=0.2):
         gc.collect()
 
     metrics_df = pd.DataFrame(records).sort_values("R2", ascending=False).reset_index(drop=True)
-    return metrics_df, predictions, top_combinations, feature_cols
+    return metrics_df, predictions, top_combinations, feature_cols, resolved_target_col, X, y
 
 
 def _viridis_colors(n):
@@ -294,13 +387,10 @@ def build_comparison_chart(metrics_df):
 
 def build_prediction_chart_single(name, frame, metric_row, color_idx=0):
     """Build a single predicted-vs-actual chart for one model — research paper quality."""
-    actual = frame["Actual"].values
-    predicted = frame["Predicted"].values
+    actual = np.clip(frame["Actual"].values, PREDICTION_PLOT_MIN, PREDICTION_PLOT_MAX)
+    predicted = np.clip(frame["Predicted"].values, PREDICTION_PLOT_MIN, PREDICTION_PLOT_MAX)
     residual = actual - predicted
-    all_vals = np.concatenate([actual, predicted])
-    lo, hi = float(np.min(all_vals)), float(np.max(all_vals))
-    pad = 0.05 * (hi - lo if hi != lo else 1.0)
-    lo, hi = lo - pad, hi + pad
+    lo, hi = PREDICTION_PLOT_MIN, PREDICTION_PLOT_MAX
 
     color = SCATTER_COLORS[color_idx % len(SCATTER_COLORS)]
 
@@ -345,6 +435,89 @@ def build_prediction_chart_single(name, frame, metric_row, color_idx=0):
         showlegend=True,
     )
     return fig
+
+
+def build_dataset_top10_chart(dataset_top10_rows, target_col):
+    if not dataset_top10_rows:
+        return "{}"
+    labels = [row["Rank"] for row in dataset_top10_rows]
+    values = [row["Actual"] for row in dataset_top10_rows]
+    feature_cols = [k for k in dataset_top10_rows[0].keys() if k not in ("Rank", "Actual")]
+
+    hover_texts = []
+    for row in dataset_top10_rows:
+        parts = [f"{col}: {format_feature_value(row[col])}" for col in feature_cols]
+        hover_texts.append("<br>".join(parts) + f"<br><b>Actual: {row['Actual']:.6f}</b>")
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=labels,
+        y=values,
+        marker=dict(color=_viridis_colors(len(values)), line=dict(color="#333", width=0.5)),
+        text=[f"{v:.4f}" for v in values],
+        textposition="outside",
+        hovertext=hover_texts,
+        hoverinfo="text",
+    ))
+    ymin = min(values) if values else 0
+    ymax = max(values) if values else 1
+    ypad = (ymax - ymin) * 0.12 if ymax != ymin else 0.02
+    fig.update_layout(
+        title=dict(text=f"<b>Dataset Top 10 - Best {target_col} Values</b>", font=dict(size=14)),
+        xaxis=dict(title="Combination Rank", showgrid=False),
+        yaxis=dict(title=f"Actual {target_col}", showgrid=True, gridcolor="#e8e8e8", range=[ymin - ypad, ymax + ypad]),
+        height=460,
+        paper_bgcolor="#fff",
+        plot_bgcolor="#fafafa",
+        font=dict(family="Inter, serif", size=11, color="#222"),
+        margin=dict(l=60, r=20, t=60, b=50),
+        showlegend=False,
+    )
+    return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
+
+
+def build_ratio_chart(ratio_df: pd.DataFrame):
+    if ratio_df.empty:
+        return "{}"
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=ratio_df["Ratio"],
+        y=ratio_df["R2"],
+        mode="lines+markers+text",
+        name="R2",
+        line=dict(color="#2a9d8f", width=2.5),
+        marker=dict(size=8),
+        text=[f"{v:.4f}" for v in ratio_df["R2"]],
+        textposition="top center",
+        hovertemplate="Ratio: %{x}<br>R2: %{y:.6f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=ratio_df["Ratio"],
+        y=ratio_df["RMSE"],
+        mode="lines+markers+text",
+        name="RMSE",
+        line=dict(color="#e76f51", width=2.5),
+        marker=dict(size=8),
+        text=[f"{v:.4f}" for v in ratio_df["RMSE"]],
+        textposition="bottom center",
+        hovertemplate="Ratio: %{x}<br>RMSE: %{y:.6f}<extra></extra>",
+        yaxis="y2",
+    ))
+
+    fig.update_layout(
+        title=dict(text="<b>Model Performance vs Train-Test Ratio</b>", font=dict(size=14)),
+        xaxis=dict(title="Train-Test Ratio", showgrid=True, gridcolor="#e8e8e8"),
+        yaxis=dict(title="R2", side="left", showgrid=True, gridcolor="#e8e8e8"),
+        yaxis2=dict(title="RMSE", overlaying="y", side="right", showgrid=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=460,
+        paper_bgcolor="#fff",
+        plot_bgcolor="#fafafa",
+        font=dict(family="Inter, serif", size=11, color="#222"),
+        margin=dict(l=60, r=60, t=60, b=50),
+    )
+    return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
 
 
 def build_prediction_charts(metrics_df, predictions):
@@ -462,13 +635,18 @@ def upload_dataset():
 
     try:
         df = load_dataset(str(filepath))
+        target_col = str(df.columns[-1])
+        dataset_top10_rows, _, feature_cols = compute_dataset_top10(df, target_col)
         info = {
             "filename": filename,
             "rows": len(df),
             "columns": len(df.columns),
-            "features": df.columns[:-1].tolist(),
-            "target": df.columns[-1],
+            "all_columns": df.columns.tolist(),
+            "features": feature_cols,
+            "target": target_col,
             "filepath": str(filepath),
+            "dataset_top10": dataset_top10_rows,
+            "dataset_top10_chart": build_dataset_top10_chart(dataset_top10_rows, target_col),
         }
         return jsonify(info)
     except Exception as e:
@@ -483,7 +661,11 @@ def train():
 
     filepath = data.get("filepath")
     selected_models = data.get("models", [])
-    test_size = data.get("test_size", 0.2)
+    target_col = data.get("target_col")
+    train_ratio = float(data.get("train_ratio", 80))
+    train_ratio = max(1.0, min(99.0, train_ratio))
+    test_size = data.get("test_size", max(0.0, min(1.0, 1.0 - (train_ratio / 100.0))))
+    ratio_list_text = data.get("ratio_list", DEFAULT_RATIO_LIST_TEXT)
 
     if not filepath:
         return jsonify({"error": "No dataset specified"}), 400
@@ -492,14 +674,39 @@ def train():
 
     try:
         df = load_dataset(filepath)
-        metrics_df, predictions, top_combinations, feature_cols = train_models(
-            df, selected_models, test_size
+        metrics_df, predictions, top_combinations, feature_cols, resolved_target_col, X, y = train_models(
+            df, selected_models, test_size, target_col=target_col
         )
+
+        if metrics_df.empty:
+            return jsonify({"error": "No valid models available to train."}), 400
+
+        train_size = 1.0 - float(test_size)
+        train_sizes = parse_train_ratio_list(ratio_list_text, primary_train_size=train_size)
+        ratio_df = run_ratio_analysis(X, y, str(metrics_df.iloc[0]["Model"]), train_sizes)
+
+        ratio_best_r2 = None
+        ratio_best_rmse = None
+        if not ratio_df.empty:
+            ratio_best_r2_row = ratio_df.loc[ratio_df["R2"].idxmax()]
+            ratio_best_rmse_row = ratio_df.loc[ratio_df["RMSE"].idxmin()]
+            ratio_best_r2 = {
+                "Ratio": str(ratio_best_r2_row["Ratio"]),
+                "R2": float(ratio_best_r2_row["R2"]),
+            }
+            ratio_best_rmse = {
+                "Ratio": str(ratio_best_rmse_row["Ratio"]),
+                "RMSE": float(ratio_best_rmse_row["RMSE"]),
+            }
+
+        dataset_top10_rows, _, _ = compute_dataset_top10(df, resolved_target_col)
 
         # Build charts
         comparison_chart = build_comparison_chart(metrics_df)
         prediction_chart = build_prediction_charts(metrics_df, predictions)
         combination_chart = build_combination_charts(metrics_df, top_combinations, feature_cols)
+        dataset_top10_chart = build_dataset_top10_chart(dataset_top10_rows, resolved_target_col)
+        ratio_chart = build_ratio_chart(ratio_df)
 
         # Build results table
         results_table = metrics_df.to_dict(orient="records")
@@ -519,12 +726,19 @@ def train():
             "comparison_chart": comparison_chart,
             "prediction_chart": prediction_chart,
             "combination_chart": combination_chart,
+            "dataset_top10": dataset_top10_rows,
+            "dataset_top10_chart": dataset_top10_chart,
             "combo_details": combo_details,
+            "ratio_table": ratio_df.round(6).to_dict(orient="records") if not ratio_df.empty else [],
+            "ratio_chart": ratio_chart,
+            "ratio_best_r2": ratio_best_r2,
+            "ratio_best_rmse": ratio_best_rmse,
             "feature_cols": feature_cols,
             "dataset_info": {
                 "rows": len(df),
+                "all_columns": df.columns.tolist(),
                 "features": feature_cols,
-                "target": df.columns[-1],
+                "target": resolved_target_col,
             },
         })
 
@@ -536,15 +750,21 @@ def train():
 def dataset_info():
     data = request.get_json()
     filepath = data.get("filepath")
+    target_col = data.get("target_col")
     if not filepath:
         return jsonify({"error": "No filepath"}), 400
     try:
         df = load_dataset(filepath)
+        _, _, resolved_target_col, feature_cols = get_features_and_target(df, target_col)
+        dataset_top10_rows, _, _ = compute_dataset_top10(df, resolved_target_col)
         return jsonify({
             "rows": len(df),
             "columns": len(df.columns),
-            "features": df.columns[:-1].tolist(),
-            "target": df.columns[-1],
+            "all_columns": df.columns.tolist(),
+            "features": feature_cols,
+            "target": resolved_target_col,
+            "dataset_top10": dataset_top10_rows,
+            "dataset_top10_chart": build_dataset_top10_chart(dataset_top10_rows, resolved_target_col),
             "preview": df.head(5).to_html(classes="table table-sm", index=False),
         })
     except Exception as e:

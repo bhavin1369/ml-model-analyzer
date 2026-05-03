@@ -9,9 +9,12 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+from matplotlib.widgets import RectangleSelector
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from sklearn.ensemble import AdaBoostRegressor, BaggingRegressor, ExtraTreesRegressor, GradientBoostingRegressor, RandomForestRegressor
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
@@ -24,6 +27,11 @@ from sklearn.tree import DecisionTreeRegressor
 
 RANDOM_STATE = 42
 DEFAULT_DATASET = Path("data.csv")
+LIGHTGBM_FALLBACK_MESSAGE = None
+XGBOOST_FALLBACK_MESSAGE = None
+DEFAULT_RATIO_LIST_TEXT = "80,70,60"
+PREDICTION_PLOT_MIN = 0.0
+PREDICTION_PLOT_MAX = 1.0
 
 QUICK_START_GUIDE_TEXT = """QUICK START GUIDE
 
@@ -96,14 +104,22 @@ Things to avoid:
 
 
 def build_xgboost_regressor():
+    global XGBOOST_FALLBACK_MESSAGE
     try:
         xgb_module = importlib.import_module("xgboost")
         xgb_regressor_class = getattr(xgb_module, "XGBRegressor")
-    except Exception as exc:
-        raise ImportError(
-            "XGBoost model requires the 'xgboost' package. "
-            "Install it with: e:/ML/.venv/Scripts/python.exe -m pip install xgboost"
-        ) from exc
+        XGBOOST_FALLBACK_MESSAGE = None
+    except (ImportError, AttributeError):
+        XGBOOST_FALLBACK_MESSAGE = (
+            "xgboost is not available in this Python environment. Using HistGradientBoostingRegressor as a local fallback so runs can continue."
+        )
+        return HistGradientBoostingRegressor(
+            learning_rate=0.05,
+            max_iter=350,
+            max_depth=6,
+            min_samples_leaf=20,
+            random_state=RANDOM_STATE,
+        )
 
     return xgb_regressor_class(
         n_estimators=300,
@@ -118,24 +134,31 @@ def build_xgboost_regressor():
 
 
 def build_lightgbm_regressor():
+    global LIGHTGBM_FALLBACK_MESSAGE
     try:
         lgbm_module = importlib.import_module("lightgbm")
         lgbm_regressor_class = getattr(lgbm_module, "LGBMRegressor")
-    except Exception as exc:
-        raise ImportError(
-            "LightGBM model requires the 'lightgbm' package. "
-            "Install it with: e:/ML/.venv/Scripts/python.exe -m pip install lightgbm"
-        ) from exc
-
-    return lgbm_regressor_class(
-        n_estimators=350,
-        learning_rate=0.05,
-        num_leaves=31,
-        subsample=0.9,
-        colsample_bytree=0.9,
-        random_state=RANDOM_STATE,
-        verbosity=-1,
-    )
+        LIGHTGBM_FALLBACK_MESSAGE = None
+        return lgbm_regressor_class(
+            n_estimators=350,
+            learning_rate=0.05,
+            num_leaves=31,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            random_state=RANDOM_STATE,
+            verbosity=-1,
+        )
+    except (ImportError, AttributeError):
+        LIGHTGBM_FALLBACK_MESSAGE = (
+            "LightGBM is not installed. Using HistGradientBoostingRegressor as a local fallback so runs can continue."
+        )
+        return HistGradientBoostingRegressor(
+            learning_rate=0.05,
+            max_iter=350,
+            max_depth=6,
+            min_samples_leaf=20,
+            random_state=RANDOM_STATE,
+        )
 
 MODEL_BUILDERS = {
     "Linear Regression": lambda: LinearRegression(),
@@ -177,13 +200,23 @@ class ModelWorkbenchGUI:
         self.root.title("ML Model Workbench")
         self.root.geometry("1300x850")
         self.root.minsize(1100, 700)
-        self.root.configure(bg="#F5F7FA")
 
         self.dataset_path = tk.StringVar(value=str(DEFAULT_DATASET))
+        self.train_ratio_var = tk.StringVar(value="80")
+        self.test_ratio_var = tk.StringVar(value="20")
+        self.ratio_list_var = tk.StringVar(value=DEFAULT_RATIO_LIST_TEXT)
+        self.target_col_var = tk.StringVar(value="")
+        self._ratio_sync_in_progress = False
+        self.train_size_value = 0.8
         self.test_size_value = 0.2
         self.status_text = tk.StringVar(value="Select dataset and model(s), then click Run Selected Models.")
 
         self.metrics_df = pd.DataFrame()
+        self.ratio_metrics_df = pd.DataFrame()
+        self.ratio_best_r2_row = None
+        self.ratio_best_rmse_row = None
+        self.dataset_top10 = None
+        self.dataset_target_col = ""
         self.prediction_frames = {}
         self.top_combinations = {}
         self.prediction_filter_frame = None
@@ -191,10 +224,191 @@ class ModelWorkbenchGUI:
         self.prediction_view_vars = {}
         self.combination_view_vars = {}
         self.model_select_vars = {}
+        self.comparison_mode_var = tk.StringVar(value="2D")
+        self._canvas_interactions = {}
 
         self._configure_style()
         self._build_layout()
         self._populate_model_list()
+
+    # ----- Interactive canvas helpers -----
+    def _enable_canvas_interactions(self, canvas):
+        state = {"annotation": None, "selectors": [], "default_limits": {}, "connections": {}, "hover_artists": []}
+        self._canvas_interactions[canvas] = state
+
+        def on_move(event, target_canvas=canvas):
+            self._handle_hover_event(target_canvas, event)
+
+        def on_leave(_event, target_canvas=canvas):
+            self._hide_hover_annotation(target_canvas)
+
+        def on_click(event, target_canvas=canvas):
+            # right-click resets zoom
+            if getattr(event, "button", None) == 3:
+                self._reset_zoom(target_canvas, event.inaxes)
+
+        state["connections"]["motion"] = canvas.mpl_connect("motion_notify_event", on_move)
+        state["connections"]["leave"] = canvas.mpl_connect("figure_leave_event", on_leave)
+        state["connections"]["click"] = canvas.mpl_connect("button_press_event", on_click)
+
+    def _set_hover_data(self, artist, text=None, texts=None):
+        if text is not None:
+            setattr(artist, "_hover_text", text)
+        if texts is not None:
+            setattr(artist, "_hover_texts", list(texts))
+        # register artist to canvas hover list
+        try:
+            fig = artist.figure
+            for canvas, state in self._canvas_interactions.items():
+                if getattr(canvas, "figure", None) is fig:
+                    if artist not in state["hover_artists"]:
+                        state["hover_artists"].append(artist)
+                    break
+        except Exception:
+            pass
+
+    def _find_hover_text(self, canvas, event):
+        ax = event.inaxes
+        if ax is None:
+            return None
+        state = self._canvas_interactions.get(canvas)
+        if state is None:
+            return None
+        artists = [a for a in state.get("hover_artists", []) if getattr(a, "axes", None) is ax]
+        for artist in reversed(artists):
+            has_single = hasattr(artist, "_hover_text")
+            has_multi = hasattr(artist, "_hover_texts")
+            try:
+                contains, info = artist.contains(event)
+            except Exception:
+                continue
+            if not contains:
+                continue
+            if has_multi:
+                indices = info.get("ind", []) if isinstance(info, dict) else []
+                if indices:
+                    texts = getattr(artist, "_hover_texts", [])
+                    idx = int(indices[0])
+                    if 0 <= idx < len(texts):
+                        return texts[idx]
+                continue
+            return getattr(artist, "_hover_text", None)
+        return None
+
+    def _handle_hover_event(self, canvas, event):
+        state = self._canvas_interactions.get(canvas)
+        if state is None:
+            return
+        if event.inaxes is None:
+            self._hide_hover_annotation(canvas)
+            return
+        text = self._find_hover_text(canvas, event)
+        if not text:
+            self._hide_hover_annotation(canvas)
+            return
+        if state["annotation"] is None or state["annotation"].axes is not event.inaxes:
+            self._hide_hover_annotation(canvas)
+            state["annotation"] = event.inaxes.annotate(
+                "",
+                xy=(0, 0),
+                xytext=(12, 12),
+                textcoords="offset points",
+                bbox=dict(boxstyle="round,pad=0.35", facecolor="#135d66", edgecolor="#0b3f45", alpha=0.95),
+                color="white",
+                fontsize=9,
+                ha="left",
+                va="bottom",
+            )
+        annotation = state["annotation"]
+        x = event.xdata if event.xdata is not None else 0.0
+        y = event.ydata if event.ydata is not None else 0.0
+        annotation.xy = (x, y)
+        if annotation.get_text() != str(text) or not annotation.get_visible():
+            annotation.set_text(str(text))
+            annotation.set_visible(True)
+            canvas.draw_idle()
+
+    def _hide_hover_annotation(self, canvas):
+        state = self._canvas_interactions.get(canvas)
+        if state is None:
+            return
+        annotation = state.get("annotation")
+        if annotation is not None and annotation.get_visible():
+            annotation.set_visible(False)
+            canvas.draw_idle()
+
+    def _setup_canvas_zoom_selectors(self, canvas):
+        state = self._canvas_interactions.get(canvas)
+        if state is None:
+            return
+        # clear any existing selectors
+        for selector in state.get("selectors", []):
+            try:
+                selector.set_active(False)
+            except Exception:
+                pass
+        state["selectors"] = []
+        state["default_limits"] = {}
+        axes_2d = [ax for ax in canvas.figure.axes if getattr(ax, "name", "") != "3d"]
+        for ax in axes_2d:
+            state["default_limits"][id(ax)] = (ax.get_xlim(), ax.get_ylim())
+
+            def on_select(eclick, erelease, target_ax=ax, target_canvas=canvas):
+                if eclick.xdata is None or erelease.xdata is None or eclick.ydata is None or erelease.ydata is None:
+                    return
+                x0, x1 = sorted([eclick.xdata, erelease.xdata])
+                y0, y1 = sorted([eclick.ydata, erelease.ydata])
+                if abs(x1 - x0) <= 1e-12 or abs(y1 - y0) <= 1e-12:
+                    return
+                target_ax.set_xlim(x0, x1)
+                target_ax.set_ylim(y0, y1)
+                target_canvas.draw_idle()
+
+            selector = RectangleSelector(
+                ax,
+                on_select,
+                useblit=True,
+                button=[1],
+                minspanx=5,
+                minspany=5,
+                spancoords="pixels",
+                interactive=False,
+                drag_from_anywhere=False,
+            )
+            state["selectors"].append(selector)
+
+    def _reset_canvas_hover_state(self, canvas):
+        state = self._canvas_interactions.get(canvas)
+        if state is None:
+            return
+        annotation = state.get("annotation")
+        if annotation is not None:
+            try:
+                annotation.remove()
+            except Exception:
+                pass
+        state["annotation"] = None
+        state["hover_artists"] = []
+
+    def _reset_zoom(self, canvas, event_ax=None):
+        state = self._canvas_interactions.get(canvas)
+        if state is None:
+            return
+        changed = False
+        for ax in canvas.figure.axes:
+            if getattr(ax, "name", "") == "3d":
+                continue
+            if event_ax is not None and ax is not event_ax:
+                continue
+            default = state["default_limits"].get(id(ax))
+            if default is None:
+                continue
+            xlim, ylim = default
+            ax.set_xlim(xlim)
+            ax.set_ylim(ylim)
+            changed = True
+        if changed:
+            canvas.draw_idle()
 
     def _build_graph_section(self, parent, title, fullscreen_command):
         container = ttk.Frame(parent)
@@ -213,9 +427,35 @@ class ModelWorkbenchGUI:
 
         ttk.Button(right_controls, text="Full Screen", command=fullscreen_command).pack(side="left")
 
-        canvas_holder = ttk.Frame(container, padding=(8, 6, 8, 8))
+        toolbar_holder = ttk.Frame(container, padding=(8, 0, 8, 4))
+        toolbar_holder.pack(fill="x")
+
+        canvas_holder = ttk.Frame(container, padding=(8, 2, 8, 8))
         canvas_holder.pack(fill="both", expand=True)
-        return container, canvas_holder, filter_frame
+        return container, canvas_holder, filter_frame, toolbar_holder
+
+    def _add_canvas_toolbar(self, parent, canvas):
+        toolbar = NavigationToolbar2Tk(canvas, parent, pack_toolbar=False)
+        toolbar.update()
+        toolbar.pack(side="left")
+
+        ttk.Button(parent, text="Reset Zoom", command=lambda: self._reset_zoom(canvas)).pack(side="left", padx=(8, 0))
+        ttk.Label(parent, text="Left drag: zoom | Right click: reset").pack(side="left", padx=(12, 0))
+
+    def _build_comparison_mode_controls(self, parent):
+        for child in parent.winfo_children():
+            child.destroy()
+
+        ttk.Label(parent, text="View:").pack(side="left", padx=(0, 6))
+
+        for mode in ("2D", "3D"):
+            ttk.Radiobutton(
+                parent,
+                text=mode,
+                value=mode,
+                variable=self.comparison_mode_var,
+                command=self._on_comparison_mode_change,
+            ).pack(side="left", padx=(0, 4))
 
     def _create_view_checkboxes(self, parent, view_vars, callback):
         for child in parent.winfo_children():
@@ -304,47 +544,17 @@ class ModelWorkbenchGUI:
         if "clam" in style.theme_names():
             style.theme_use("clam")
 
-        # Modern color palette
-        primary_color = "#0D47A1"      # Deep professional blue
-        primary_hover = "#1565C0"      # Lighter blue on hover
-        accent_color ="#1565C0"       # Vibrant orange
-        bg_color = "#F5F7FA"           # Light clean background
-        fg_color = "#2C3E50"           # Dark text
-        secondary_color = "#ECF0F3"    # Light gray-blue
-
-        # Configure base theme
-        style.configure("TFrame", background=bg_color)
-        style.configure("TLabelframe", background=bg_color, foreground=fg_color)
-        style.configure("TLabel", background=bg_color, foreground=fg_color)
-        style.configure("TButton", font=("Segoe UI", 9), background=secondary_color)
-        
-        # Title styles
-        style.configure("Title.TLabel", font=("Segoe UI", 16, "bold"), foreground=primary_color, background=bg_color)
-        style.configure("Subtitle.TLabel", font=("Segoe UI", 11, "bold"), foreground=primary_color, background=bg_color)
-        style.configure("Info.TLabel", font=("Segoe UI", 9), foreground=fg_color, background=bg_color)
-        
-        # Control box styling
-        style.configure("Control.TLabelframe", background=secondary_color, foreground=primary_color, borderwidth=1, relief="solid")
-        style.configure("Control.TLabelframe.Label", font=("Segoe UI", 10, "bold"), foreground=primary_color, background=secondary_color)
-        style.configure("ControlHeading.TLabel", font=("Segoe UI", 16, "bold"), foreground=primary_color, background=bg_color)
-        style.configure("SectionTitle.TLabel", font=("Segoe UI", 10, "bold"), foreground=primary_color, background=bg_color)
-        
-        # Action button styling
-        style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), background=accent_color, foreground="white")
-        style.map("Accent.TButton", background=[("active", "#1565C0"), ("pressed", "#F8F6F6")], foreground=[("active", "white")])
-        
-        # Primary button styling
-        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"), background=primary_color, foreground="white")
-        style.map("Primary.TButton", background=[("active", primary_hover), ("pressed", "#0D3B7F")], foreground=[("active", "white")])
-        
-        # Treeview styling
-        style.configure("Treeview", background="#FFFFFF", fieldbackground="#FFFFFF", foreground=fg_color, rowheight=25)
-        style.configure("Treeview.Heading", background=primary_color, foreground="white", font=("Segoe UI", 10, "bold"))
-        style.map("Treeview", background=[("selected", secondary_color)], foreground=[("selected", primary_color)])
-        
-        # Entry styling
-        style.configure("TEntry", fieldbackground="#FFFFFF", background=bg_color, foreground=fg_color, padding=5)
-        style.map("TEntry", fieldbackground=[("focus", "#FFFFFF")], bordercolor=[("focus", primary_color)])
+        style.configure("Title.TLabel", font=("Segoe UI", 14, "bold"))
+        style.configure("Subtitle.TLabel", font=("Segoe UI", 10, "bold"))
+        style.configure("Info.TLabel", font=("Segoe UI", 10))
+        style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"))
+        style.configure("Control.TLabelframe", background="#efefef")
+        style.configure("Control.TLabelframe.Label", font=("Segoe UI", 10, "bold"), foreground="#222222")
+        style.configure("ControlHeading.TLabel", font=("Segoe UI", 16, "bold"), foreground="#1f1f1f")
+        style.configure("SectionTitle.TLabel", font=("Segoe UI", 9, "bold"), foreground="#222222")
+        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"))
+        style.configure("Primary.TButton", background="#2e73b8", foreground="white")
+        style.map("Primary.TButton", background=[("active", "#215d99")], foreground=[("active", "white")])
 
     def _build_layout(self):
         top = ttk.Frame(self.root, padding=12)
@@ -359,9 +569,32 @@ class ModelWorkbenchGUI:
         ttk.Button(top, text="Browse", command=self._browse_dataset).grid(row=2, column=4, sticky="we", padx=(0, 6))
         ttk.Button(top, text="Load Info", command=self._show_dataset_info).grid(row=2, column=5, sticky="we")
 
+        ttk.Label(top, text="Target Column", style="Subtitle.TLabel").grid(row=3, column=0, sticky="w", pady=(8, 2))
+        self.target_col_combo = ttk.Combobox(top, textvariable=self.target_col_var, width=40, state="readonly")
+        self.target_col_combo.grid(row=4, column=0, columnspan=2, sticky="we", padx=(0, 8))
+
+        ttk.Label(top, text="Train Ratio (%)", style="Subtitle.TLabel").grid(row=5, column=0, sticky="w", pady=(8, 2))
+        train_entry = ttk.Entry(top, textvariable=self.train_ratio_var, width=12)
+        train_entry.grid(row=6, column=0, sticky="w")
+
+        ttk.Label(top, text="Test Ratio (%)", style="Subtitle.TLabel").grid(row=5, column=1, sticky="w", pady=(8, 2))
+        test_entry = ttk.Entry(top, textvariable=self.test_ratio_var, width=12)
+        test_entry.grid(row=6, column=1, sticky="w")
+
+        ttk.Label(top, text="Train Ratios List (%)", style="Subtitle.TLabel").grid(row=5, column=2, sticky="w", pady=(8, 2))
+        ratios_entry = ttk.Entry(top, textvariable=self.ratio_list_var, width=28)
+        ratios_entry.grid(row=6, column=2, columnspan=2, sticky="we", padx=(0, 8))
+
+        ttk.Label(top, text="Default: 80,70,60", style="Info.TLabel").grid(row=6, column=4, sticky="w")
+
         ttk.Button(top, text="Run Selected Models", style="Accent.TButton", command=self.run_selected_models).grid(
-            row=3, column=5, sticky="we", pady=(6, 0)
+            row=6, column=5, sticky="we", pady=(6, 0)
         )
+
+        train_entry.bind("<KeyRelease>", self._on_train_ratio_change)
+        train_entry.bind("<FocusOut>", self._on_train_ratio_focus_out)
+        test_entry.bind("<KeyRelease>", self._on_test_ratio_change)
+        test_entry.bind("<FocusOut>", self._on_test_ratio_focus_out)
 
         top.columnconfigure(0, weight=1)
         top.columnconfigure(1, weight=1)
@@ -383,7 +616,7 @@ class ModelWorkbenchGUI:
         models_box = ttk.LabelFrame(left_panel, text="SELECT MODELS", style="Control.TLabelframe", padding=8)
         models_box.pack(fill="both", expand=True, pady=(0, 8))
 
-        self.model_check_frame = tk.Frame(models_box, bg="#FFFFFF", bd=1, relief="solid")
+        self.model_check_frame = tk.Frame(models_box, bg="#f9f9f9", bd=1, relief="solid")
         self.model_check_frame.pack(fill="both", expand=True)
 
         guide_box = ttk.LabelFrame(left_panel, text="QUICK START GUIDE", style="Control.TLabelframe", padding=8)
@@ -396,8 +629,7 @@ class ModelWorkbenchGUI:
             wrap="word",
             relief="solid",
             borderwidth=1,
-            bg="#FFFFFF",
-            fg="#2C3E50",
+            bg="#f8f8f8",
             font=("Segoe UI", 9),
         )
         self.guide_text.pack(side="left", fill="both", expand=True)
@@ -410,30 +642,51 @@ class ModelWorkbenchGUI:
 
         notebook = ttk.Notebook(right_panel)
         notebook.pack(fill="both", expand=True)
+        self.notebook = notebook
 
+        dataset_top10_tab = ttk.Frame(notebook)
         charts_tab = ttk.Frame(notebook)
         predictions_tab = ttk.Frame(notebook)
         combinations_tab = ttk.Frame(notebook)
         table_tab = ttk.Frame(notebook)
+        ratio_tab = ttk.Frame(notebook)
         output_tab = ttk.Frame(notebook)
 
+        notebook.add(dataset_top10_tab, text="Dataset Top 10")
         notebook.add(charts_tab, text="Model Comparison")
         notebook.add(predictions_tab, text="Predicted vs Actual")
         notebook.add(combinations_tab, text="Top 10 Combinations")
         notebook.add(table_tab, text="Model Results")
+        notebook.add(ratio_tab, text="Ratio Analysis")
         notebook.add(output_tab, text="Output Preview")
 
-        _, metrics_holder, _ = self._build_graph_section(
+        _, dataset_top10_holder, _, dataset_top10_toolbar_holder = self._build_graph_section(
+            dataset_top10_tab,
+            "Top 10 Best Combinations from Actual Dataset",
+            self.open_dataset_top10_fullscreen,
+        )
+
+        self.dataset_top10_fig = Figure(figsize=(9, 6), dpi=100)
+        self.dataset_top10_canvas = FigureCanvasTkAgg(self.dataset_top10_fig, master=dataset_top10_holder)
+        self.dataset_top10_canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._enable_canvas_interactions(self.dataset_top10_canvas)
+        self._add_canvas_toolbar(dataset_top10_toolbar_holder, self.dataset_top10_canvas)
+
+        _, metrics_holder, self.comparison_filter_frame, metrics_toolbar_holder = self._build_graph_section(
             charts_tab,
             "Model Performance Comparison",
             self.open_metrics_fullscreen,
         )
 
-        self.metrics_fig = Figure(figsize=(9, 6), dpi=100)
+        self._build_comparison_mode_controls(self.comparison_filter_frame)
+
+        self.metrics_fig = Figure(figsize=(13, 7), dpi=100)
         self.metrics_canvas = FigureCanvasTkAgg(self.metrics_fig, master=metrics_holder)
         self.metrics_canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._enable_canvas_interactions(self.metrics_canvas)
+        self._add_canvas_toolbar(metrics_toolbar_holder, self.metrics_canvas)
 
-        _, predictions_holder, self.prediction_filter_frame = self._build_graph_section(
+        _, predictions_holder, self.prediction_filter_frame, prediction_toolbar_holder = self._build_graph_section(
             predictions_tab,
             "Prediction Charts",
             self.open_predictions_fullscreen,
@@ -442,8 +695,10 @@ class ModelWorkbenchGUI:
         self.pred_fig = Figure(figsize=(9, 6), dpi=100)
         self.pred_canvas = FigureCanvasTkAgg(self.pred_fig, master=predictions_holder)
         self.pred_canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._enable_canvas_interactions(self.pred_canvas)
+        self._add_canvas_toolbar(prediction_toolbar_holder, self.pred_canvas)
 
-        _, combinations_holder, self.combination_filter_frame = self._build_graph_section(
+        _, combinations_holder, self.combination_filter_frame, combination_toolbar_holder = self._build_graph_section(
             combinations_tab,
             "Top 10 Best Combinations by Model",
             self.open_combinations_fullscreen,
@@ -452,6 +707,8 @@ class ModelWorkbenchGUI:
         self.combo_fig = Figure(figsize=(9, 6), dpi=100)
         self.combo_canvas = FigureCanvasTkAgg(self.combo_fig, master=combinations_holder)
         self.combo_canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._enable_canvas_interactions(self.combo_canvas)
+        self._add_canvas_toolbar(combination_toolbar_holder, self.combo_canvas)
 
         table_frame = ttk.Frame(table_tab, padding=8)
         table_frame.pack(fill="both", expand=True)
@@ -467,13 +724,48 @@ class ModelWorkbenchGUI:
         y_scroll.pack(side="right", fill="y")
         self.results_table.configure(yscrollcommand=y_scroll.set)
 
-        self.output_text = tk.Text(output_tab, wrap="none", relief="solid", borderwidth=1, bg="#FFFFFF", fg="#2C3E50", font=("Courier New", 9))
+        ratio_table_frame = ttk.Frame(ratio_tab, padding=8)
+        ratio_table_frame.pack(fill="x")
+
+        ratio_columns = ("Ratio", "R2", "RMSE")
+        self.ratio_results_table = ttk.Treeview(ratio_table_frame, columns=ratio_columns, show="headings", height=6)
+        for col in ratio_columns:
+            self.ratio_results_table.heading(col, text=col)
+            self.ratio_results_table.column(col, anchor="center", width=180)
+        self.ratio_results_table.pack(side="left", fill="x", expand=True)
+
+        ratio_scroll = ttk.Scrollbar(ratio_table_frame, orient="vertical", command=self.ratio_results_table.yview)
+        ratio_scroll.pack(side="right", fill="y")
+        self.ratio_results_table.configure(yscrollcommand=ratio_scroll.set)
+
+        _, ratio_holder, _, ratio_toolbar_holder = self._build_graph_section(
+            ratio_tab,
+            "Model Performance vs Train-Test Ratio",
+            self.open_ratio_fullscreen,
+        )
+
+        self.ratio_fig = Figure(figsize=(9, 5.6), dpi=100)
+        self.ratio_canvas = FigureCanvasTkAgg(self.ratio_fig, master=ratio_holder)
+        self.ratio_canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._enable_canvas_interactions(self.ratio_canvas)
+        self._add_canvas_toolbar(ratio_toolbar_holder, self.ratio_canvas)
+
+        self.output_text = tk.Text(output_tab, wrap="none", relief="solid", borderwidth=1)
         self.output_text.pack(fill="both", expand=True, padx=8, pady=8)
 
         status = ttk.Label(self.root, textvariable=self.status_text, style="Info.TLabel", padding=(12, 6))
         status.pack(fill="x", side="bottom")
 
         self._draw_empty_graphs()
+        # initialize selectors (store default limits)
+        try:
+            self._setup_canvas_zoom_selectors(self.dataset_top10_canvas)
+            self._setup_canvas_zoom_selectors(self.metrics_canvas)
+            self._setup_canvas_zoom_selectors(self.pred_canvas)
+            self._setup_canvas_zoom_selectors(self.combo_canvas)
+            self._setup_canvas_zoom_selectors(self.ratio_canvas)
+        except Exception:
+            pass
 
     def _populate_model_list(self):
         for child in self.model_check_frame.winfo_children():
@@ -500,13 +792,29 @@ class ModelWorkbenchGUI:
 
     def _draw_empty_graphs(self):
         self._refresh_model_filters()
+        self._reset_canvas_hover_state(self.dataset_top10_canvas)
+        self._render_dataset_top10_figure(self.dataset_top10_fig, empty=True)
+        self._setup_canvas_zoom_selectors(self.dataset_top10_canvas)
+        self.dataset_top10_canvas.draw_idle()
+
+        self._reset_canvas_hover_state(self.metrics_canvas)
         self._render_model_comparison_figure(self.metrics_fig, empty=True)
+        self._setup_canvas_zoom_selectors(self.metrics_canvas)
         self.metrics_canvas.draw_idle()
 
+        self._reset_canvas_hover_state(self.ratio_canvas)
+        self._render_ratio_analysis_figure(self.ratio_fig, empty=True)
+        self._setup_canvas_zoom_selectors(self.ratio_canvas)
+        self.ratio_canvas.draw_idle()
+
+        self._reset_canvas_hover_state(self.pred_canvas)
         self._render_prediction_figure(self.pred_fig, empty=True)
+        self._setup_canvas_zoom_selectors(self.pred_canvas)
         self.pred_canvas.draw_idle()
 
+        self._reset_canvas_hover_state(self.combo_canvas)
         self._render_combination_figure(self.combo_fig, empty=True)
+        self._setup_canvas_zoom_selectors(self.combo_canvas)
         self.combo_canvas.draw_idle()
 
     def _get_best_model_name(self):
@@ -537,14 +845,17 @@ class ModelWorkbenchGUI:
     def _on_combination_view_change(self, _event=None):
         self._update_combination_chart()
 
+    def _on_comparison_mode_change(self):
+        self._update_metric_charts()
+
     def _build_metric_bar_colors(self, count, highlight_index, cmap_name):
         cmap = plt.get_cmap(cmap_name)
         if count <= 1:
-            return ["#FF6B35"]
+            return ["#2a9d8f"]
 
         shades = np.linspace(0.42, 0.88, count)
         colors = [cmap(value) for value in shades]
-        colors[highlight_index] = "#FF6B35"
+        colors[highlight_index] = "#2a9d8f"
         return colors
 
     def _annotate_horizontal_bars(self, ax, values, offset=0.01, fmt="{:.4f}", fontsize=8):
@@ -596,16 +907,22 @@ class ModelWorkbenchGUI:
         best_idx = len(display_df) - 1
         best_row = display_df.iloc[best_idx]
 
+        if self.comparison_mode_var.get() == "3D":
+            self._render_model_comparison_figure_3d(figure, models, rmse_vals, r2_vals, best_idx, best_row)
+            return
+
         ax1 = figure.add_subplot(121)
-        ax1.barh(
+        bars_r2 = ax1.barh(
             models,
             r2_vals * 100.0,
             color=self._build_metric_bar_colors(len(models), best_idx, "Blues"),
-            edgecolor="#0D47A1",
+            edgecolor="#2b2b2b",
             linewidth=0.3,
         )
+        for model_name, value, bar in zip(models, r2_vals, bars_r2):
+            self._set_hover_data(bar, text=f"Model: {model_name}\nR2: {value:.6f} ({value * 100.0:.2f}%)")
         self._annotate_horizontal_bars(ax1, r2_vals * 100.0, offset=0.006, fmt="{:.2f}%", fontsize=8)
-        ax1.axvline(best_row["R2"] * 100.0, color="#FF6B35", linestyle="--", linewidth=1.6, label="This Model")
+        ax1.axvline(best_row["R2"] * 100.0, color="#e76f51", linestyle="--", linewidth=1.6, label="This Model")
         ax1.set_title(
             f"Model Accuracy Comparison\n{best_row['Model']}: {best_row['R2'] * 100:.2f}%",
             fontweight="bold",
@@ -617,15 +934,17 @@ class ModelWorkbenchGUI:
         ax1.legend(loc="upper right", fontsize=8)
 
         ax2 = figure.add_subplot(122)
-        ax2.barh(
+        bars_rmse = ax2.barh(
             models,
             rmse_vals,
             color=self._build_metric_bar_colors(len(models), best_idx, "Oranges"),
-            edgecolor="#0D47A1",
+            edgecolor="#2b2b2b",
             linewidth=0.3,
         )
+        for model_name, value, bar in zip(models, rmse_vals, bars_rmse):
+            self._set_hover_data(bar, text=f"Model: {model_name}\nRMSE: {value:.6f}")
         self._annotate_horizontal_bars(ax2, rmse_vals, offset=0.02, fmt="{:.4f}", fontsize=8)
-        ax2.axvline(best_row["RMSE"], color="#FF6B35", linestyle="--", linewidth=1.6, label="This Model")
+        ax2.axvline(best_row["RMSE"], color="#e76f51", linestyle="--", linewidth=1.6, label="This Model")
         ax2.set_title(
             f"Model Error Comparison\n{best_row['Model']}: {best_row['RMSE']:.6f}",
             fontweight="bold",
@@ -641,6 +960,134 @@ class ModelWorkbenchGUI:
             ax.invert_yaxis()
 
         figure.tight_layout()
+
+    def _render_model_comparison_figure_3d(self, figure, models, rmse_vals, r2_vals, best_idx, best_row):
+        figure.clear()
+        outer = figure.add_gridspec(2, 1, height_ratios=[4.9, 1.3], hspace=0.08)
+        top = outer[0].subgridspec(1, 2, wspace=0.32)
+        ax1 = figure.add_subplot(top[0, 0], projection="3d")
+        ax2 = figure.add_subplot(top[0, 1], projection="3d")
+        info_ax = figure.add_subplot(outer[1, 0])
+        info_ax.set_facecolor("#f6f6f6")
+        info_ax.set_xticks([])
+        info_ax.set_yticks([])
+        for spine in info_ax.spines.values():
+            spine.set_visible(True)
+            spine.set_edgecolor("#666666")
+            spine.set_linewidth(0.9)
+
+        self._plot_3d_metric_bars(
+            ax1,
+            models,
+            r2_vals * 100.0,
+            best_idx,
+            "Blues",
+            f"Model Accuracy Comparison (3D)\n{best_row['Model']}: {best_row['R2'] * 100:.2f}%",
+            "R² Score (%)",
+        )
+
+        self._plot_3d_metric_bars(
+            ax2,
+            models,
+            rmse_vals,
+            best_idx,
+            "Oranges",
+            f"Model Error Comparison (3D)\n{best_row['Model']}: {best_row['RMSE']:.6f}",
+            "RMSE (Error Rate)",
+        )
+
+        self._draw_model_reference_box(info_ax, models, r2_vals * 100.0, rmse_vals)
+        figure.subplots_adjust(left=0.02, right=0.99, top=0.93, bottom=0.06)
+
+    def _draw_model_reference_box(self, ax, models, r2_values, rmse_values):
+        items = []
+        for name, r2_value, rmse_value in zip(models, r2_values, rmse_values):
+            items.append(f"{name} | R2={r2_value:.2f}% | RMSE={rmse_value:.6f}")
+
+        col_count = 3
+        rows = int(math.ceil(len(items) / col_count))
+        columns = [items[column_index * rows:(column_index + 1) * rows] for column_index in range(col_count)]
+        x_positions = [0.02, 0.35, 0.68]
+
+        ax.text(
+            0.015,
+            0.97,
+            "Model Reference Box",
+            ha="left",
+            va="top",
+            fontsize=10,
+            fontweight="bold",
+            color="#222222",
+            transform=ax.transAxes,
+        )
+
+        for column_text, x_pos in zip(columns, x_positions):
+            ax.text(
+                x_pos,
+                0.80,
+                "\n".join(column_text),
+                ha="left",
+                va="top",
+                fontsize=7.4,
+                family="monospace",
+                color="#111111",
+                transform=ax.transAxes,
+                bbox=dict(boxstyle="round,pad=0.34", facecolor="#ffffff", edgecolor="#bbbbbb", alpha=1.0),
+            )
+
+    def _format_model_axis_label(self, name):
+        short_map = {
+            "Linear Regression": "Linear Reg",
+            "Gradient Boosting": "Grad Boost",
+            "Random Forest": "Rand Forest",
+            "Decision Tree": "Decision Tree",
+            "Extra Trees": "Extra Trees",
+        }
+        name = short_map.get(name, name)
+        parts = name.split()
+        if len(parts) <= 1:
+            return name
+        # Stack words vertically so each tick uses minimal horizontal space.
+        return "\n".join(parts)
+
+    def _plot_3d_metric_bars(self, ax, labels, values, highlight_index, cmap_name, title, zlabel):
+        x_positions = np.arange(len(labels), dtype=float) * 1.45
+        y_positions = np.zeros(len(labels), dtype=float)
+        z_positions = np.zeros(len(labels), dtype=float)
+        dx = np.full(len(labels), 0.50, dtype=float)
+        dy = np.full(len(labels), 0.65, dtype=float)
+        colors = self._build_metric_bar_colors(len(labels), highlight_index, cmap_name)
+
+        ax.bar3d(x_positions, y_positions, z_positions, dx, dy, values, color=colors, edgecolor="#2b2b2b", linewidth=0.25)
+        # invisible points used for hover on 3D bars
+        try:
+            hover_scatter = ax.scatter(x_positions + dx / 2, y_positions + dy / 2, values, s=48, c="none", alpha=0.0)
+            hover_texts = [f"{label}\n{zlabel}: {value:.6f}" for label, value in zip(labels, values)]
+            self._set_hover_data(hover_scatter, texts=hover_texts)
+        except Exception:
+            pass
+        ax.set_title(title, fontweight="bold", fontsize=12, pad=14)
+        ax.set_xlabel("Models", labelpad=12)
+        ax.set_ylabel("")
+        ax.set_yticks([])
+        ax.set_zlabel(zlabel, labelpad=8)
+        ax.set_xticks(x_positions + dx / 2)
+        wrapped_labels = [self._format_model_axis_label(name) for name in labels]
+        ax.set_xticklabels(wrapped_labels, rotation=0, ha="center", fontsize=8.0)
+        try:
+            ax.set_box_aspect((2.8, 1.0, 1.25))
+        except Exception:
+            pass
+        ax.view_init(elev=24, azim=-58)
+        try:
+            ax.dist = 12.8
+        except Exception:
+            pass
+
+        max_value = float(np.max(values)) if len(values) else 1.0
+        ax.set_zlim(0, max(max_value * 1.15, 1.0))
+
+        ax.grid(False)
 
     def _render_prediction_figure(self, figure, empty=False):
         figure.clear()
@@ -663,17 +1110,35 @@ class ModelWorkbenchGUI:
         cols = 1 if n == 1 else 2
         rows = int(math.ceil(n / cols))
 
-        all_actual = np.concatenate([self.prediction_frames[name]["Actual"].values for name in names])
-        all_pred = np.concatenate([self.prediction_frames[name]["Predicted"].values for name in names])
-        low = float(min(np.min(all_actual), np.min(all_pred)))
-        high = float(max(np.max(all_actual), np.max(all_pred)))
-        pad = 0.05 * (high - low if high != low else 1.0)
-        low, high = low - pad, high + pad
+        # Keep chart bounded to [0, 1] so no plotted point appears above 1.
+        low = PREDICTION_PLOT_MIN
+        high = PREDICTION_PLOT_MAX
 
         for idx, name in enumerate(names, start=1):
             ax = figure.add_subplot(rows, cols, idx)
             frame = self.prediction_frames[name]
-            ax.scatter(frame["Actual"], frame["Predicted"], s=18, alpha=0.8, color="#457b9d")
+            actual_plot = np.clip(frame["Actual"].to_numpy(dtype=float), PREDICTION_PLOT_MIN, PREDICTION_PLOT_MAX)
+            pred_plot = np.clip(frame["Predicted"].to_numpy(dtype=float), PREDICTION_PLOT_MIN, PREDICTION_PLOT_MAX)
+            residual_magnitude = np.abs(actual_plot - pred_plot)
+            scatter = ax.scatter(
+                actual_plot,
+                pred_plot,
+                s=18,
+                alpha=0.9,
+                c=residual_magnitude,
+                cmap="viridis",
+                edgecolors="white",
+                linewidths=0.25,
+            )
+            # attach hover texts for each scatter point
+            try:
+                hover_texts = [
+                    f"Model: {name}\nActual: {actual:.6f}\nPredicted: {pred:.6f}\nResidual: {res:.6f}"
+                    for actual, pred, res in zip(actual_plot, pred_plot, residual_magnitude)
+                ]
+                self._set_hover_data(scatter, texts=hover_texts)
+            except Exception:
+                pass
             ax.plot([low, high], [low, high], "r--", linewidth=1.2)
             ax.set_xlim(low, high)
             ax.set_ylim(low, high)
@@ -681,6 +1146,7 @@ class ModelWorkbenchGUI:
             ax.set_title(f"{name} | R²={metric_row['R2']:.4f} | RMSE={metric_row['RMSE']:.4f}")
             ax.set_xlabel("Actual")
             ax.set_ylabel("Predicted")
+            figure.colorbar(scatter, ax=ax, fraction=0.046, pad=0.03, label="|Residual|")
 
         figure.tight_layout()
 
@@ -730,6 +1196,7 @@ class ModelWorkbenchGUI:
         if len(model_names) == 1:
             model_name = model_names[0]
             top_df = self.top_combinations[model_name].sort_values("Predicted", ascending=False).reset_index(drop=True)
+            feature_cols = [c for c in top_df.columns if c not in ("Combination", "Predicted")]
 
             grid = figure.add_gridspec(1, 2, width_ratios=[1.40, 1.30], wspace=0.04)
             ax_bar = figure.add_subplot(grid[0, 0])
@@ -740,6 +1207,10 @@ class ModelWorkbenchGUI:
             colors = plt.get_cmap("viridis")(np.linspace(0.1, 0.9, len(values)))
 
             bars = ax_bar.bar(labels, values, color=colors, edgecolor="none")
+            for rank, (bar, (_, row)) in enumerate(zip(bars, top_df.iterrows()), start=1):
+                details = [f"{col}: {self._format_feature_value(row[col])}" for col in feature_cols]
+                tooltip = f"Rank: C{rank}\nPredicted: {row['Predicted']:.6f}\n" + "\n".join(details)
+                self._set_hover_data(bar, text=tooltip)
             self._annotate_vertical_bars(ax_bar, values, offset=0.004, fmt="{:.4f}", fontsize=9)
             ax_bar.set_title(f"{model_name} - Top 10 Best Combinations", fontsize=12, fontweight="bold")
             ax_bar.set_xlabel("Combination Rank")
@@ -794,7 +1265,10 @@ class ModelWorkbenchGUI:
             top_df = self.top_combinations[model_name].sort_values("Predicted", ascending=False).reset_index(drop=True)
             ranks = [f"Top {rank}" for rank in range(1, len(top_df) + 1)]
             values = top_df["Predicted"].to_numpy(dtype=float)[::-1]
-            ax.barh(ranks[::-1], values, color="#FF6B35")
+            bars = ax.barh(ranks[::-1], values, color="#2a9d8f")
+            ranked_rows = top_df.iloc[::-1].reset_index(drop=True)
+            for rank_name, bar, (_, row) in zip(ranks[::-1], bars, ranked_rows.iterrows()):
+                self._set_hover_data(bar, text=f"{rank_name}\nPredicted: {row['Predicted']:.6f}")
             self._annotate_horizontal_bars(ax, values, offset=0.01, fmt="{:.4f}", fontsize=8)
             best_value = float(top_df["Predicted"].iloc[0])
             ax.set_title(f"{model_name} - Top 10 (Best={best_value:.4f})")
@@ -807,7 +1281,7 @@ class ModelWorkbenchGUI:
         window = tk.Toplevel(self.root)
         window.title(title)
         window.attributes("-fullscreen", True)
-        window.configure(background="#F5F7FA")
+        window.configure(background="#111111")
 
         def close_window(_event=None):
             window.destroy()
@@ -823,29 +1297,52 @@ class ModelWorkbenchGUI:
         ttk.Label(topbar, text=title, style="Title.TLabel").pack(side="left")
         ttk.Button(topbar, text="Close", command=close_window).pack(side="right")
 
-        fig = Figure(figsize=(14, 9), dpi=110)
-        render_function(fig)
+        fig = Figure(figsize=(22, 11), dpi=110)
         canvas = FigureCanvasTkAgg(fig, master=wrapper)
+        self._enable_canvas_interactions(canvas)
+
+        toolbar_frame = ttk.Frame(wrapper)
+        toolbar_frame.pack(fill="x", pady=(0, 6))
+
+        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame, pack_toolbar=False)
+        toolbar.update()
+        toolbar.pack(side="left")
+
+        ttk.Button(toolbar_frame, text="Reset Zoom", command=lambda: self._reset_zoom(canvas)).pack(side="left", padx=(8, 0))
+        ttk.Label(toolbar_frame, text="Left drag: zoom | Right click: reset").pack(side="left", padx=(12, 0))
+
         canvas.get_tk_widget().pack(fill="both", expand=True)
-        canvas.draw_idle()
+
+        def redraw_fullscreen():
+            self._reset_canvas_hover_state(canvas)
+            render_function(fig)
+            self._setup_canvas_zoom_selectors(canvas)
+            canvas.draw_idle()
+
+        redraw_fullscreen()
 
         def on_resize(event):
             if event.width < 200 or event.height < 150:
                 return
             fig.set_size_inches(event.width / fig.dpi, event.height / fig.dpi, forward=True)
-            render_function(fig)
-            canvas.draw_idle()
+            redraw_fullscreen()
 
         wrapper.bind("<Configure>", on_resize)
 
     def open_metrics_fullscreen(self):
         self._open_fullscreen_window("Model Comparison Full Screen", self._render_model_comparison_figure)
 
+    def open_dataset_top10_fullscreen(self):
+        self._open_fullscreen_window("Dataset Top 10 Full Screen", self._render_dataset_top10_figure)
+
     def open_predictions_fullscreen(self):
         self._open_fullscreen_window("Prediction Charts Full Screen", self._render_prediction_figure)
 
     def open_combinations_fullscreen(self):
         self._open_fullscreen_window("Top 10 Combinations Full Screen", self._render_combination_figure)
+
+    def open_ratio_fullscreen(self):
+        self._open_fullscreen_window("Ratio Analysis Full Screen", self._render_ratio_analysis_figure)
 
     def _browse_dataset(self):
         selected = filedialog.askopenfilename(
@@ -885,17 +1382,30 @@ class ModelWorkbenchGUI:
             self.status_text.set("Dataset loading failed. Please check the file and try again.")
             return
 
-        feature_cols = dataset.columns[:-1].tolist()
-        target_col = dataset.columns[-1]
+        # Populate target column dropdown with all column names
+        all_cols = dataset.columns.tolist()
+        self.target_col_combo['values'] = all_cols
+        
+        # Set default target to last column
+        default_target = dataset.columns[-1]
+        self.target_col_var.set(default_target)
+        
+        # Get features excluding the selected target
+        target_col = default_target
+        feature_cols = [col for col in all_cols if col != target_col]
 
         msg = (
             f"Rows: {len(dataset)}\n"
             f"Columns: {len(dataset.columns)}\n"
-            f"Target column: {target_col}\n"
+            f"All columns: {', '.join(all_cols)}\n"
+            f"Target column (you can change): {target_col}\n"
             f"Feature columns: {', '.join(feature_cols)}"
         )
         messagebox.showinfo("Dataset Information", msg)
-        self.status_text.set("Dataset loaded successfully.")
+        self._compute_dataset_top10(dataset)
+        self._update_dataset_top10_chart()
+        self.notebook.select(0)
+        self.status_text.set("Dataset loaded successfully. Select target column if needed, then click 'Run Selected Models'.")
 
     def _load_dataset(self, path_str: str) -> pd.DataFrame:
         csv_path = Path(path_str).expanduser()
@@ -912,16 +1422,356 @@ class ModelWorkbenchGUI:
 
         return df
 
+    def _get_features_and_target(self, df: pd.DataFrame):
+        """
+        Extract features (X) and target (y) based on selected target column.
+        Returns: (X, y, target_col_name, feature_cols_list)
+        """
+        target_col = self.target_col_var.get()
+        if not target_col or target_col not in df.columns:
+            # Fallback to last column if not selected
+            target_col = df.columns[-1]
+            self.target_col_var.set(target_col)
+        
+        feature_cols = [col for col in df.columns if col != target_col]
+        X = df[feature_cols]
+        y = df[target_col]
+        
+        return X, y, target_col, feature_cols
+
+    def _compute_dataset_top10(self, df: pd.DataFrame):
+        _, _, target_col, feature_cols = self._get_features_and_target(df)
+        top10 = df.nlargest(10, target_col).reset_index(drop=True)
+        top10_display = top10.copy()
+        top10_display["Combination"] = top10_display.apply(
+            lambda row: self._format_combination_name(row, feature_cols),
+            axis=1,
+        )
+        top10_display = top10_display.rename(columns={target_col: "Actual"})
+        self.dataset_top10 = top10_display
+        self.dataset_target_col = target_col
+
+    def _build_dataset_top10_details_text(self, top_df, feature_cols, wrap_width=78):
+        lines = ["Top-10 Dataset Combination Details"]
+        for rank, (_, row) in enumerate(top_df.iterrows(), start=1):
+            params = ", ".join(
+                f"{col.split('(')[0].strip()}={self._format_feature_value(row[col])}" for col in feature_cols
+            )
+            line = f"C{rank}: {params} | {self.dataset_target_col}={row['Actual']:.4f}"
+            lines.append(textwrap.fill(line, width=wrap_width, subsequent_indent="    "))
+        return "\n".join(lines)
+
+    def _render_dataset_top10_figure(self, figure, empty=False):
+        figure.clear()
+
+        if empty or self.dataset_top10 is None:
+            ax = figure.add_subplot(111)
+            ax.text(
+                0.5,
+                0.5,
+                "Load a dataset to see the top 10 best combinations\nfrom the actual data",
+                ha="center",
+                va="center",
+                fontsize=12,
+            )
+            ax.axis("off")
+            return
+
+        top_df = self.dataset_top10.copy()
+        feature_cols = [c for c in top_df.columns if c not in ("Combination", "Actual")]
+
+        grid = figure.add_gridspec(1, 2, width_ratios=[1.40, 1.30], wspace=0.04)
+        ax_bar = figure.add_subplot(grid[0, 0])
+        ax_text = figure.add_subplot(grid[0, 1])
+
+        labels = [f"C{i + 1}" for i in range(len(top_df))]
+        values = top_df["Actual"].to_numpy(dtype=float)
+        colors = plt.get_cmap("plasma")(np.linspace(0.15, 0.85, len(values)))
+
+        bars = ax_bar.bar(labels, values, color=colors, edgecolor="none")
+        for rank, (bar, (_, row)) in enumerate(zip(bars, top_df.iterrows()), start=1):
+            details = [f"{col}: {self._format_feature_value(row[col])}" for col in feature_cols]
+            tooltip = f"Rank: C{rank}\nActual: {row['Actual']:.6f}\n" + "\n".join(details)
+            self._set_hover_data(bar, text=tooltip)
+        self._annotate_vertical_bars(ax_bar, values, offset=0.004, fmt="{:.4f}", fontsize=9)
+        ax_bar.set_title(f"Dataset Top 10 - Best {self.dataset_target_col} Values", fontsize=12, fontweight="bold")
+        ax_bar.set_xlabel("Combination Rank")
+        ax_bar.set_ylabel(f"Actual {self.dataset_target_col}")
+        ax_bar.tick_params(axis="x", rotation=0)
+
+        ymin = float(np.min(values)) if len(values) else 0.0
+        ymax = float(np.max(values)) if len(values) else 1.0
+        if np.isclose(ymin, ymax):
+            pad = 0.02 if np.isclose(ymax, 0.0) else abs(ymax) * 0.03
+            ax_bar.set_ylim(ymin - pad, ymax + pad)
+        else:
+            pad = (ymax - ymin) * 0.08
+            ax_bar.set_ylim(ymin - pad, ymax + pad)
+
+        wrap_width = 86 if figure.get_figwidth() >= 15 else 74
+        details_text = self._build_dataset_top10_details_text(top_df, feature_cols, wrap_width=wrap_width)
+        line_count = details_text.count("\n") + 1
+        details_font_size = 8.8 if line_count <= 24 else 8.0
+
+        ax_text.axis("off")
+        ax_text.text(
+            0.02,
+            0.50,
+            details_text,
+            va="center",
+            ha="left",
+            fontsize=details_font_size,
+            transform=ax_text.transAxes,
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="#FFF8E1", edgecolor="#FF8F00", alpha=1.0),
+        )
+
+        try:
+            figure.subplots_adjust(left=0.06, right=0.97, top=0.90, bottom=0.12)
+        except Exception:
+            pass
+
+    def _update_dataset_top10_chart(self):
+        self._reset_canvas_hover_state(self.dataset_top10_canvas)
+        self._render_dataset_top10_figure(self.dataset_top10_fig)
+        self._setup_canvas_zoom_selectors(self.dataset_top10_canvas)
+        self.dataset_top10_canvas.draw_idle()
+
+    def _parse_percent_value(self, raw_value: str):
+        value_text = str(raw_value).strip()
+        if value_text == "":
+            return None
+
+        percent = float(value_text)
+        if percent < 0 or percent > 100:
+            raise ValueError("Ratio must be between 0 and 100.")
+        return percent
+
+    def _format_percent_text(self, percent: float):
+        return f"{percent:.2f}".rstrip("0").rstrip(".")
+
+    def _set_split_from_train_percent(self, train_percent: float):
+        train_size = train_percent / 100.0
+        if train_size <= 0.0 or train_size >= 1.0:
+            raise ValueError("Train ratio must be greater than 0 and less than 100 for train/test split.")
+
+        self.train_size_value = train_size
+        self.test_size_value = 1.0 - train_size
+
+    def _sync_ratio_pair(self, source="train"):
+        if self._ratio_sync_in_progress:
+            return
+
+        self._ratio_sync_in_progress = True
+        try:
+            if source == "train":
+                train_percent = self._parse_percent_value(self.train_ratio_var.get())
+                if train_percent is None:
+                    return
+                test_percent = 100.0 - train_percent
+                self.test_ratio_var.set(self._format_percent_text(test_percent))
+                self._set_split_from_train_percent(train_percent)
+            else:
+                test_percent = self._parse_percent_value(self.test_ratio_var.get())
+                if test_percent is None:
+                    return
+                train_percent = 100.0 - test_percent
+                self.train_ratio_var.set(self._format_percent_text(train_percent))
+                self._set_split_from_train_percent(train_percent)
+        finally:
+            self._ratio_sync_in_progress = False
+
+    def _on_train_ratio_change(self, _event=None):
+        try:
+            self._sync_ratio_pair(source="train")
+        except ValueError:
+            pass
+
+    def _on_test_ratio_change(self, _event=None):
+        try:
+            self._sync_ratio_pair(source="test")
+        except ValueError:
+            pass
+
+    def _on_train_ratio_focus_out(self, _event=None):
+        try:
+            self._sync_ratio_pair(source="train")
+        except ValueError as exc:
+            messagebox.showerror("Invalid Ratio", str(exc))
+            self.train_ratio_var.set("80")
+            self.test_ratio_var.set("20")
+            self._set_split_from_train_percent(80.0)
+
+    def _on_test_ratio_focus_out(self, _event=None):
+        try:
+            self._sync_ratio_pair(source="test")
+        except ValueError as exc:
+            messagebox.showerror("Invalid Ratio", str(exc))
+            self.train_ratio_var.set("80")
+            self.test_ratio_var.set("20")
+            self._set_split_from_train_percent(80.0)
+
+    def _parse_train_ratio_list(self):
+        default_ratios = [0.8, 0.7, 0.6]
+        text = self.ratio_list_var.get().strip()
+
+        ratios = list(default_ratios)
+        for token in [part.strip() for part in text.split(",") if part.strip()]:
+            numeric = float(token)
+            percent = numeric * 100.0 if numeric <= 1.0 else numeric
+            if percent <= 0 or percent >= 100:
+                raise ValueError("Each train ratio in the list must be greater than 0 and less than 100.")
+            ratios.append(round(percent / 100.0, 4))
+
+        if not ratios:
+            raise ValueError("Please provide at least one train ratio.")
+
+        deduped = list(dict.fromkeys(ratios))
+        return deduped
+
+    def _ratio_label(self, train_size: float):
+        train_pct = int(round(train_size * 100))
+        test_pct = 100 - train_pct
+        return f"{train_pct}-{test_pct}"
+
+    def _build_model_pipeline(self, model_name: str):
+        model = MODEL_BUILDERS[model_name]()
+        return Pipeline([
+            ("scaler", StandardScaler()),
+            ("model", model),
+        ])
+
+    def _compute_regression_metrics(self, y_true, y_pred):
+        mse = mean_squared_error(y_true, y_pred)
+        return {
+            "MSE": float(mse),
+            "RMSE": float(np.sqrt(mse)),
+            "R2": float(r2_score(y_true, y_pred)),
+        }
+
+    def _train_single_model(self, model_name, X_train, X_test, y_train, y_test):
+        pipeline = self._build_model_pipeline(model_name)
+        pipeline.fit(X_train, y_train)
+        y_pred = pipeline.predict(X_test)
+        metrics = self._compute_regression_metrics(y_test, y_pred)
+        pred_df = pd.DataFrame({
+            "Actual": y_test.reset_index(drop=True),
+            "Predicted": pd.Series(y_pred),
+            "Residual": y_test.reset_index(drop=True) - pd.Series(y_pred),
+        })
+        return pipeline, metrics, pred_df
+
+    def _run_ratio_analysis(self, X, y, model_name, train_sizes):
+        rows = []
+        r2_values = []
+        rmse_values = []
+        ratio_labels = []
+
+        for train_size in train_sizes:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X,
+                y,
+                test_size=(1.0 - train_size),
+                random_state=RANDOM_STATE,
+            )
+            _, metrics, _ = self._train_single_model(model_name, X_train, X_test, y_train, y_test)
+            ratio_text = self._ratio_label(train_size)
+            ratio_labels.append(ratio_text)
+            r2_values.append(metrics["R2"])
+            rmse_values.append(metrics["RMSE"])
+            rows.append({
+                "Ratio": ratio_text,
+                "TrainSize": train_size,
+                "R2": metrics["R2"],
+                "RMSE": metrics["RMSE"],
+            })
+
+        ratio_df = pd.DataFrame(rows)
+        return ratio_df, ratio_labels, r2_values, rmse_values
+
+    def _render_ratio_analysis_figure(self, figure, empty=False):
+        figure.clear()
+
+        if empty or self.ratio_metrics_df.empty:
+            ax = figure.add_subplot(111)
+            ax.text(0.5, 0.5, "Run models to see ratio-based R2 and RMSE analysis", ha="center", va="center", fontsize=12)
+            ax.axis("off")
+            return
+
+        ax = figure.add_subplot(111, projection="3d")
+
+        ratio_labels = self.ratio_metrics_df["Ratio"].tolist()
+        r2_vals = self.ratio_metrics_df["R2"].to_numpy(dtype=float)
+        rmse_vals = self.ratio_metrics_df["RMSE"].to_numpy(dtype=float)
+
+        x = np.arange(len(ratio_labels), dtype=float)
+        dx = np.full(len(ratio_labels), 0.45, dtype=float)
+        dy = np.full(len(ratio_labels), 0.35, dtype=float)
+
+        r2_color = "#2a9d8f"
+        rmse_color = "#e76f51"
+
+        ax.bar3d(x, np.zeros(len(x)), np.zeros(len(x)), dx, dy, r2_vals, color=r2_color, edgecolor="#222222", alpha=0.92)
+        ax.bar3d(x, np.ones(len(x)), np.zeros(len(x)), dx, dy, rmse_vals, color=rmse_color, edgecolor="#222222", alpha=0.92)
+        try:
+            hover_r2 = ax.scatter(x + dx / 2, np.zeros(len(x)) + dy / 2, r2_vals, s=40, c="none", alpha=0.0)
+            hover_rmse = ax.scatter(x + dx / 2, np.ones(len(x)) + dy / 2, rmse_vals, s=40, c="none", alpha=0.0)
+            self._set_hover_data(hover_r2, texts=[f"Ratio: {label}\nR2: {value:.6f}" for label, value in zip(ratio_labels, r2_vals)])
+            self._set_hover_data(hover_rmse, texts=[f"Ratio: {label}\nRMSE: {value:.6f}" for label, value in zip(ratio_labels, rmse_vals)])
+        except Exception:
+            pass
+
+        ax.set_title("Model Performance vs Train-Test Ratio", fontweight="bold", pad=16)
+        ax.set_xlabel("Train-Test Ratio", labelpad=10)
+        ax.set_ylabel("Metrics", labelpad=10)
+        ax.set_zlabel("Values", labelpad=10)
+
+        ax.set_xticks(x + dx / 2)
+        ax.set_xticklabels(ratio_labels)
+        ax.set_yticks([0 + dy[0] / 2, 1 + dy[0] / 2])
+        ax.set_yticklabels(["R2", "RMSE"])
+        ax.view_init(elev=23, azim=-58)
+
+        from matplotlib.patches import Patch
+        legend_handles = [Patch(facecolor=r2_color, edgecolor="#222222", label="R2"), Patch(facecolor=rmse_color, edgecolor="#222222", label="RMSE")]
+        ax.legend(handles=legend_handles, loc="upper left", bbox_to_anchor=(0.02, 0.98))
+
+        z_max = max(float(np.max(r2_vals)), float(np.max(rmse_vals)))
+        ax.set_zlim(0, max(z_max * 1.15, 1.0))
+        figure.subplots_adjust(left=0.05, right=0.98, top=0.92, bottom=0.08)
+
+    def _update_ratio_results_table(self):
+        for item in self.ratio_results_table.get_children():
+            self.ratio_results_table.delete(item)
+
+        for _, row in self.ratio_metrics_df.iterrows():
+            self.ratio_results_table.insert(
+                "",
+                "end",
+                values=(
+                    row["Ratio"],
+                    f"{row['R2']:.6f}",
+                    f"{row['RMSE']:.6f}",
+                ),
+            )
+
     def run_selected_models(self):
+        global LIGHTGBM_FALLBACK_MESSAGE, XGBOOST_FALLBACK_MESSAGE
         selected_models = self._get_selected_model_names()
         if not selected_models:
             messagebox.showwarning("No Model Selected", "Please select at least one model.")
             return
 
+        LIGHTGBM_FALLBACK_MESSAGE = None
+        XGBOOST_FALLBACK_MESSAGE = None
+
         try:
+            self._sync_ratio_pair(source="train")
+            requested_train_sizes = self._parse_train_ratio_list()
+            if round(self.train_size_value, 4) not in requested_train_sizes:
+                requested_train_sizes.insert(0, round(self.train_size_value, 4))
+
             df = self._load_dataset(self.dataset_path.get())
-            X = df.iloc[:, :-1]
-            y = df.iloc[:, -1]
+            X, y, target_col, feature_cols = self._get_features_and_target(df)
 
             X_train, X_test, y_train, y_test = train_test_split(
                 X,
@@ -933,34 +1783,15 @@ class ModelWorkbenchGUI:
             records = []
             predictions = {}
             top_combinations = {}
-            feature_cols = X.columns.tolist()
 
             for model_name in selected_models:
-                model = MODEL_BUILDERS[model_name]()
-                # Keep preprocessing with each model to avoid data leakage and keep behavior consistent.
-                pipeline = Pipeline([
-                    ("scaler", StandardScaler()),
-                    ("model", model),
-                ])
-
-                pipeline.fit(X_train, y_train)
-                y_pred = pipeline.predict(X_test)
-
-                mse = mean_squared_error(y_test, y_pred)
-                rmse = float(np.sqrt(mse))
-                r2 = r2_score(y_test, y_pred)
+                pipeline, metrics, pred_df = self._train_single_model(model_name, X_train, X_test, y_train, y_test)
 
                 records.append({
                     "Model": model_name,
-                    "RMSE": rmse,
-                    "MSE": mse,
-                    "R2": r2,
-                })
-
-                pred_df = pd.DataFrame({
-                    "Actual": y_test.reset_index(drop=True),
-                    "Predicted": pd.Series(y_pred),
-                    "Residual": y_test.reset_index(drop=True) - pd.Series(y_pred),
+                    "RMSE": metrics["RMSE"],
+                    "MSE": metrics["MSE"],
+                    "R2": metrics["R2"],
                 })
                 predictions[model_name] = pred_df
 
@@ -978,18 +1809,35 @@ class ModelWorkbenchGUI:
             self.metrics_df = pd.DataFrame(records).sort_values("R2", ascending=False).reset_index(drop=True)
             self.prediction_frames = predictions
             self.top_combinations = top_combinations
+
+            ratio_model_name = str(self.metrics_df.iloc[0]["Model"])
+            ratio_df, _, _, _ = self._run_ratio_analysis(X, y, ratio_model_name, requested_train_sizes)
+            self.ratio_metrics_df = ratio_df
+            self.ratio_best_r2_row = ratio_df.loc[ratio_df["R2"].idxmax()]
+            self.ratio_best_rmse_row = ratio_df.loc[ratio_df["RMSE"].idxmin()]
+
             self._refresh_model_filters()
 
             self._update_results_table()
+            self._update_ratio_results_table()
             self._update_metric_charts()
+            self._update_ratio_chart()
             self._update_prediction_chart()
             self._update_combination_chart()
             self._update_output_preview(df)
 
             best_model = self.metrics_df.iloc[0]
             self.status_text.set(
-                f"Run complete. Best model: {best_model['Model']} (R²={best_model['R2']:.4f}, RMSE={best_model['RMSE']:.4f})"
+                f"Run complete. Best model: {best_model['Model']} (R²={best_model['R2']:.4f}, RMSE={best_model['RMSE']:.4f}) | "
+                f"Best ratio by R²: {self.ratio_best_r2_row['Ratio']} ({self.ratio_best_r2_row['R2']:.4f}) | "
+                f"Best ratio by RMSE: {self.ratio_best_rmse_row['Ratio']} ({self.ratio_best_rmse_row['RMSE']:.4f})"
             )
+
+            if LIGHTGBM_FALLBACK_MESSAGE:
+                self.status_text.set(f"{self.status_text.get()} | {LIGHTGBM_FALLBACK_MESSAGE}")
+
+            if XGBOOST_FALLBACK_MESSAGE:
+                self.status_text.set(f"{self.status_text.get()} | {XGBOOST_FALLBACK_MESSAGE}")
 
         except Exception as exc:
             messagebox.showerror("Run Failed", str(exc))
@@ -1012,29 +1860,65 @@ class ModelWorkbenchGUI:
             )
 
     def _update_metric_charts(self):
+        self._reset_canvas_hover_state(self.metrics_canvas)
         self._render_model_comparison_figure(self.metrics_fig)
+        self._setup_canvas_zoom_selectors(self.metrics_canvas)
         self.metrics_canvas.draw_idle()
 
+    def _update_ratio_chart(self):
+        self._reset_canvas_hover_state(self.ratio_canvas)
+        self._render_ratio_analysis_figure(self.ratio_fig)
+        self._setup_canvas_zoom_selectors(self.ratio_canvas)
+        self.ratio_canvas.draw_idle()
+
     def _update_prediction_chart(self):
+        self._reset_canvas_hover_state(self.pred_canvas)
         self._render_prediction_figure(self.pred_fig)
+        self._setup_canvas_zoom_selectors(self.pred_canvas)
         self.pred_canvas.draw_idle()
 
     def _update_combination_chart(self):
+        self._reset_canvas_hover_state(self.combo_canvas)
         self._render_combination_figure(self.combo_fig)
+        self._setup_canvas_zoom_selectors(self.combo_canvas)
         self.combo_canvas.draw_idle()
 
     def _update_output_preview(self, source_df: pd.DataFrame):
         self.output_text.delete("1.0", "end")
 
+        _, _, target_col, feature_cols = self._get_features_and_target(source_df)
+        best_row = self.metrics_df.iloc[0] if not self.metrics_df.empty else None
+
         header = [
             f"Run timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"Dataset: {self.dataset_path.get()}",
             f"Rows used: {len(source_df)}",
-            f"Features: {', '.join(source_df.columns[:-1])}",
-            f"Target: {source_df.columns[-1]}",
+            f"Train-Test ratio used for detailed model run: {self._ratio_label(self.train_size_value)}",
+            f"Features: {', '.join(feature_cols)}",
+            f"Target: {target_col}",
+            "",
+            (
+                f"Best metrics (highest R²): {best_row['Model']} | R²={best_row['R2']:.6f} | RMSE={best_row['RMSE']:.6f}"
+                if best_row is not None
+                else "Best metrics (highest R²): N/A"
+            ),
             "",
             "Metrics (sorted by R² descending):",
             self.metrics_df.to_string(index=False),
+            "",
+            "Ratio analysis (best model across train-test ratios):",
+            self.ratio_metrics_df[["Ratio", "R2", "RMSE"]].to_string(index=False) if not self.ratio_metrics_df.empty else "No ratio analysis available",
+            "",
+            (
+                f"Best ratio by R²: {self.ratio_best_r2_row['Ratio']} (R²={self.ratio_best_r2_row['R2']:.6f})"
+                if self.ratio_best_r2_row is not None
+                else "Best ratio by R²: N/A"
+            ),
+            (
+                f"Best ratio by RMSE: {self.ratio_best_rmse_row['Ratio']} (RMSE={self.ratio_best_rmse_row['RMSE']:.6f})"
+                if self.ratio_best_rmse_row is not None
+                else "Best ratio by RMSE: N/A"
+            ),
             "",
             "Sample predictions (top 10 rows per selected model):",
             "",
@@ -1081,7 +1965,11 @@ class ModelWorkbenchGUI:
         if combo_merged:
             pd.concat(combo_merged, ignore_index=True).to_csv(combo_path, index=False)
 
-        messagebox.showinfo("Export Complete", f"Saved:\n{metrics_path}\n{pred_path}\n{combo_path}")
+        ratio_path = out_dir / f"ratio_metrics_{stamp}.csv"
+        if not self.ratio_metrics_df.empty:
+            self.ratio_metrics_df.to_csv(ratio_path, index=False)
+
+        messagebox.showinfo("Export Complete", f"Saved:\n{metrics_path}\n{pred_path}\n{combo_path}\n{ratio_path}")
         self.status_text.set("Results exported in output/gui_runs.")
 
 
