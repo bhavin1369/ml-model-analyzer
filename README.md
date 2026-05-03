@@ -102,9 +102,3 @@ Your CSV file should look like this:
 | Frontend  | HTML, CSS, JavaScript |
 | Hosting   | Render (free tier) |
 | Server    | Gunicorn |
-
----
-
-## License
-
-MIT License — free to use for academic and personal projects.
