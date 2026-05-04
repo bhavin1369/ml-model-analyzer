@@ -572,6 +572,7 @@ class ModelWorkbenchGUI:
         ttk.Label(top, text="Target Column", style="Subtitle.TLabel").grid(row=3, column=0, sticky="w", pady=(8, 2))
         self.target_col_combo = ttk.Combobox(top, textvariable=self.target_col_var, width=40, state="readonly")
         self.target_col_combo.grid(row=4, column=0, columnspan=2, sticky="we", padx=(0, 8))
+        self.target_col_combo.bind("<<ComboboxSelected>>", self._on_target_col_change)
 
         ttk.Label(top, text="Train Ratio (%)", style="Subtitle.TLabel").grid(row=5, column=0, sticky="w", pady=(8, 2))
         train_entry = ttk.Entry(top, textvariable=self.train_ratio_var, width=12)
@@ -842,6 +843,17 @@ class ModelWorkbenchGUI:
     def _on_prediction_view_change(self, _event=None):
         self._update_prediction_chart()
 
+    def _on_target_col_change(self, _event=None):
+        """Update dataset top 10 chart when user changes target column."""
+        try:
+            if hasattr(self, 'dataset_top10') and self.dataset_top10 is not None:
+                df = self._load_dataset(self.dataset_path.get())
+                self._compute_dataset_top10(df)
+                self._update_dataset_top10_chart()
+                self.status_text.set(f"Dataset Top 10 updated for: {self.target_col_var.get()}")
+        except Exception as exc:
+            self.status_text.set(f"Error updating target column: {str(exc)}")
+
     def _on_combination_view_change(self, _event=None):
         self._update_combination_chart()
 
@@ -859,36 +871,12 @@ class ModelWorkbenchGUI:
         return colors
 
     def _annotate_horizontal_bars(self, ax, values, offset=0.01, fmt="{:.4f}", fontsize=8):
-        if len(values) == 0:
-            return
-
-        max_value = float(np.max(values)) if np.size(values) else 0.0
-        label_offset = max(max_value * offset, 0.001)
-        for bar, value in zip(ax.patches, values):
-            ax.text(
-                bar.get_width() + label_offset,
-                bar.get_y() + bar.get_height() / 2,
-                fmt.format(value),
-                va="center",
-                ha="left",
-                fontsize=fontsize,
-            )
+        # All bar value labels disabled - users can hover to see values
+        return
 
     def _annotate_vertical_bars(self, ax, values, offset=0.002, fmt="{:.4f}", fontsize=8):
-        if len(values) == 0:
-            return
-
-        max_value = float(np.max(values)) if np.size(values) else 0.0
-        label_offset = max(max_value * offset, 0.001)
-        for bar, value in zip(ax.patches, values):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + label_offset,
-                fmt.format(value),
-                ha="center",
-                va="bottom",
-                fontsize=fontsize,
-            )
+        # All bar value labels disabled - users can hover to see values
+        return
 
     def _render_model_comparison_figure(self, figure, empty=False):
         figure.clear()
@@ -911,9 +899,12 @@ class ModelWorkbenchGUI:
             self._render_model_comparison_figure_3d(figure, models, rmse_vals, r2_vals, best_idx, best_row)
             return
 
+        # Use wrapped labels for y-axis so long model names don't overlap
+        wrapped_models = [self._format_model_axis_label(m) for m in models]
+
         ax1 = figure.add_subplot(121)
         bars_r2 = ax1.barh(
-            models,
+            wrapped_models,
             r2_vals * 100.0,
             color=self._build_metric_bar_colors(len(models), best_idx, "Blues"),
             edgecolor="#2b2b2b",
@@ -930,12 +921,12 @@ class ModelWorkbenchGUI:
         )
         ax1.set_xlabel("R² Score (%)", fontweight="bold")
         ax1.set_xlim(0, max(100.0, float(np.max(r2_vals) * 100.0) * 1.05))
-        ax1.tick_params(axis="y", labelsize=9)
+        ax1.tick_params(axis="y", labelsize=8)
         ax1.legend(loc="upper right", fontsize=8)
 
         ax2 = figure.add_subplot(122)
         bars_rmse = ax2.barh(
-            models,
+            wrapped_models,
             rmse_vals,
             color=self._build_metric_bar_colors(len(models), best_idx, "Oranges"),
             edgecolor="#2b2b2b",
@@ -952,14 +943,18 @@ class ModelWorkbenchGUI:
         )
         ax2.set_xlabel("RMSE (Error Rate)", fontweight="bold")
         ax2.set_xlim(0, max(float(np.max(rmse_vals)) * 1.05, float(best_row["RMSE"]) * 1.1, 0.01))
-        ax2.tick_params(axis="y", labelsize=9)
+        ax2.tick_params(axis="y", labelsize=8)
         ax2.legend(loc="lower right", fontsize=8)
 
         for ax in (ax1, ax2):
             ax.grid(axis="x", linestyle="--", alpha=0.2)
             ax.invert_yaxis()
 
-        figure.tight_layout()
+        # Apply tight layout to avoid label clipping
+        try:
+            figure.tight_layout()
+        except Exception:
+            pass
 
     def _render_model_comparison_figure_3d(self, figure, models, rmse_vals, r2_vals, best_idx, best_row):
         figure.clear()
@@ -998,11 +993,16 @@ class ModelWorkbenchGUI:
 
         self._draw_model_reference_box(info_ax, models, r2_vals * 100.0, rmse_vals)
         figure.subplots_adjust(left=0.02, right=0.99, top=0.93, bottom=0.06)
+        # extra tight layout attempt to avoid clipping long labels in 3D
+        try:
+            figure.tight_layout()
+        except Exception:
+            pass
 
     def _draw_model_reference_box(self, ax, models, r2_values, rmse_values):
         items = []
-        for name, r2_value, rmse_value in zip(models, r2_values, rmse_values):
-            items.append(f"{name} | R2={r2_value:.2f}% | RMSE={rmse_value:.6f}")
+        for idx, (name, r2_value, rmse_value) in enumerate(zip(models, r2_values, rmse_values), 1):
+            items.append(f"{idx}. {name} | R2={r2_value:.2f}% | RMSE={rmse_value:.6f}")
 
         col_count = 3
         rows = int(math.ceil(len(items) / col_count))
@@ -1012,7 +1012,7 @@ class ModelWorkbenchGUI:
         ax.text(
             0.015,
             0.97,
-            "Model Reference Box",
+            "Model Reference (1=First, 2=Second, etc.)",
             ha="left",
             va="top",
             fontsize=10,
@@ -1036,26 +1036,29 @@ class ModelWorkbenchGUI:
             )
 
     def _format_model_axis_label(self, name):
+        # Use compact multi-line labels so 3D tick text stays readable.
         short_map = {
-            "Linear Regression": "Linear Reg",
-            "Gradient Boosting": "Grad Boost",
-            "Random Forest": "Rand Forest",
-            "Decision Tree": "Decision Tree",
-            "Extra Trees": "Extra Trees",
+            "Linear Regression": "Linear\nReg",
+            "Gradient Boosting": "Gradient\nBoosting",
+            "Random Forest": "Random\nForest",
+            "Decision Tree": "Decision\nTree",
+            "Extra Trees": "Extra\nTrees",
+            "AdaBoost": "Ada\nBoost",
+            "LightGBM": "Light\nGBM",
+            "XGBoost": "XG\nBoost",
+            "Bagging": "Bagging",
+            "KNN": "KNN",
+            "SVR": "SVR",
         }
-        name = short_map.get(name, name)
-        parts = name.split()
-        if len(parts) <= 1:
-            return name
-        # Stack words vertically so each tick uses minimal horizontal space.
-        return "\n".join(parts)
+        return short_map.get(name, name)
 
     def _plot_3d_metric_bars(self, ax, labels, values, highlight_index, cmap_name, title, zlabel):
-        x_positions = np.arange(len(labels), dtype=float) * 1.45
+        # Give labels more room by spreading bars a bit further apart.
+        x_positions = np.arange(len(labels), dtype=float) * 1.55
         y_positions = np.zeros(len(labels), dtype=float)
         z_positions = np.zeros(len(labels), dtype=float)
-        dx = np.full(len(labels), 0.50, dtype=float)
-        dy = np.full(len(labels), 0.65, dtype=float)
+        dx = np.full(len(labels), 0.34, dtype=float)
+        dy = np.full(len(labels), 0.50, dtype=float)
         colors = self._build_metric_bar_colors(len(labels), highlight_index, cmap_name)
 
         ax.bar3d(x_positions, y_positions, z_positions, dx, dy, values, color=colors, edgecolor="#2b2b2b", linewidth=0.25)
@@ -1067,20 +1070,21 @@ class ModelWorkbenchGUI:
         except Exception:
             pass
         ax.set_title(title, fontweight="bold", fontsize=12, pad=14)
-        ax.set_xlabel("Models", labelpad=12)
+        ax.set_xlabel("Models", labelpad=14, fontweight="bold")
         ax.set_ylabel("")
         ax.set_yticks([])
         ax.set_zlabel(zlabel, labelpad=8)
         ax.set_xticks(x_positions + dx / 2)
-        wrapped_labels = [self._format_model_axis_label(name) for name in labels]
-        ax.set_xticklabels(wrapped_labels, rotation=0, ha="center", fontsize=8.0)
+        numeric_labels = [str(i + 1) for i in range(len(labels))]
+        ax.set_xticklabels(numeric_labels, rotation=0, ha="center", fontsize=10, fontweight="bold")
+        ax.tick_params(axis="x", pad=1)
         try:
-            ax.set_box_aspect((2.8, 1.0, 1.25))
+            ax.set_box_aspect((3.5, 1.0, 1.25))
         except Exception:
             pass
-        ax.view_init(elev=24, azim=-58)
+        ax.view_init(elev=22, azim=-60)
         try:
-            ax.dist = 12.8
+            ax.dist = 12.2
         except Exception:
             pass
 
@@ -1110,16 +1114,31 @@ class ModelWorkbenchGUI:
         cols = 1 if n == 1 else 2
         rows = int(math.ceil(n / cols))
 
-        # Keep chart bounded to [0, 1] so no plotted point appears above 1.
-        low = PREDICTION_PLOT_MIN
-        high = PREDICTION_PLOT_MAX
-
+        # Auto-scale axes based on data (support arbitrary units: nm, THz, etc.)
         for idx, name in enumerate(names, start=1):
             ax = figure.add_subplot(rows, cols, idx)
             frame = self.prediction_frames[name]
-            actual_plot = np.clip(frame["Actual"].to_numpy(dtype=float), PREDICTION_PLOT_MIN, PREDICTION_PLOT_MAX)
-            pred_plot = np.clip(frame["Predicted"].to_numpy(dtype=float), PREDICTION_PLOT_MIN, PREDICTION_PLOT_MAX)
+            # convert to float arrays (no clipping) so original units are preserved
+            actual_plot = frame["Actual"].to_numpy(dtype=float)
+            pred_plot = frame["Predicted"].to_numpy(dtype=float)
             residual_magnitude = np.abs(actual_plot - pred_plot)
+
+            # Axis limits: use combined min/max with small padding
+            combined_min = float(np.nanmin(np.concatenate([actual_plot, pred_plot])))
+            combined_max = float(np.nanmax(np.concatenate([actual_plot, pred_plot])))
+            if math.isfinite(combined_min) and math.isfinite(combined_max):
+                span = combined_max - combined_min
+                if span == 0 or np.isclose(span, 0.0):
+                    # flat data: apply small relative padding
+                    pad = abs(combined_max) * 0.05 if combined_max != 0 else 0.5
+                else:
+                    pad = span * 0.04
+                low = combined_min - pad
+                high = combined_max + pad
+            else:
+                # fallback to default fractional range
+                low = PREDICTION_PLOT_MIN
+                high = PREDICTION_PLOT_MAX
             scatter = ax.scatter(
                 actual_plot,
                 pred_plot,
@@ -1130,22 +1149,46 @@ class ModelWorkbenchGUI:
                 edgecolors="white",
                 linewidths=0.25,
             )
-            # attach hover texts for each scatter point
+            # attach hover texts for each scatter point using formatted values
             try:
                 hover_texts = [
-                    f"Model: {name}\nActual: {actual:.6f}\nPredicted: {pred:.6f}\nResidual: {res:.6f}"
+                    f"Model: {name}\nActual: {self._format_feature_value(actual)}\nPredicted: {self._format_feature_value(pred)}\nResidual: {self._format_feature_value(res)}"
                     for actual, pred, res in zip(actual_plot, pred_plot, residual_magnitude)
                 ]
                 self._set_hover_data(scatter, texts=hover_texts)
             except Exception:
                 pass
+
+            # equality line and axis limits based on data
             ax.plot([low, high], [low, high], "r--", linewidth=1.2)
             ax.set_xlim(low, high)
             ax.set_ylim(low, high)
             metric_row = self.metrics_df[self.metrics_df["Model"] == name].iloc[0]
             ax.set_title(f"{name} | R²={metric_row['R2']:.4f} | RMSE={metric_row['RMSE']:.4f}")
-            ax.set_xlabel("Actual")
-            ax.set_ylabel("Predicted")
+
+            # attempt to infer unit from dataset target column name
+            unit_label = ""
+            try:
+                colname = (self.dataset_target_col or "").lower()
+                if "nm" in colname:
+                    unit_label = " (nm)"
+                elif "thz" in colname or "hz" in colname:
+                    # prefer THz mention first
+                    if "thz" in colname:
+                        unit_label = " (THz)"
+                    else:
+                        unit_label = " (Hz)"
+                elif "db" in colname or "db(" in colname:
+                    unit_label = " (dB)"
+                elif "%" in colname:
+                    unit_label = " (%)"
+            except Exception:
+                unit_label = ""
+
+            ax.set_xlabel(f"Actual{unit_label}")
+            ax.set_ylabel(f"Predicted{unit_label}")
+
+            # colorbar for residual magnitude (auto-scaled)
             figure.colorbar(scatter, ax=ax, fraction=0.046, pad=0.03, label="|Residual|")
 
         figure.tight_layout()
@@ -1211,7 +1254,7 @@ class ModelWorkbenchGUI:
                 details = [f"{col}: {self._format_feature_value(row[col])}" for col in feature_cols]
                 tooltip = f"Rank: C{rank}\nPredicted: {row['Predicted']:.6f}\n" + "\n".join(details)
                 self._set_hover_data(bar, text=tooltip)
-            self._annotate_vertical_bars(ax_bar, values, offset=0.004, fmt="{:.4f}", fontsize=9)
+            # value labels removed per user request
             ax_bar.set_title(f"{model_name} - Top 10 Best Combinations", fontsize=12, fontweight="bold")
             ax_bar.set_xlabel("Combination Rank")
             ax_bar.set_ylabel("Predicted Target")
@@ -1226,15 +1269,7 @@ class ModelWorkbenchGUI:
                 pad = (ymax - ymin) * 0.08
                 ax_bar.set_ylim(ymin - pad, ymax + pad)
 
-            for bar, val in zip(bars, values):
-                ax_bar.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    val,
-                    f"{val:.4f}",
-                    ha="center",
-                    va="bottom",
-                    fontsize=9,
-                )
+            # value labels on bars removed per user request
 
             wrap_width = 86 if figure.get_figwidth() >= 15 else 74
             details_text = self._build_top10_details_text(top_df, wrap_width=wrap_width)
@@ -1269,7 +1304,7 @@ class ModelWorkbenchGUI:
             ranked_rows = top_df.iloc[::-1].reset_index(drop=True)
             for rank_name, bar, (_, row) in zip(ranks[::-1], bars, ranked_rows.iterrows()):
                 self._set_hover_data(bar, text=f"{rank_name}\nPredicted: {row['Predicted']:.6f}")
-            self._annotate_horizontal_bars(ax, values, offset=0.01, fmt="{:.4f}", fontsize=8)
+            # value labels removed per user request
             best_value = float(top_df["Predicted"].iloc[0])
             ax.set_title(f"{model_name} - Top 10 (Best={best_value:.4f})")
             ax.set_xlabel("Predicted Target")
