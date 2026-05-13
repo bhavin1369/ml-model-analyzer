@@ -1,6 +1,7 @@
 import math
 import importlib
 import textwrap
+import joblib
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
@@ -60,7 +61,7 @@ QUICK_START_GUIDE_TEXT = """QUICK START GUIDE
 
 UNDERSTANDING THE METRICS
 
-r^2 Score (Accuracy):
+R2 Score (Accuracy):
     1.00: Perfect prediction
     0.99 - 1.00: EXCELLENT (near perfect)
     0.90 - 0.99: VERY GOOD (excellent accuracy)
@@ -94,7 +95,7 @@ Good practices:
     - Ensure your target variable is numerical
     - More data = usually better predictions
     - Try different model combinations
-    - Compare r^2 scores to find best model
+    - Compare R2 scores to find best model
 
 Things to avoid:
     - Very small datasets (less than 50 samples)
@@ -235,8 +236,12 @@ class ModelWorkbenchGUI:
         self.prediction_ymax_var = tk.StringVar(value="")
         self.prediction_xunit_var = tk.StringVar(value="")
         self.prediction_yunit_var = tk.StringVar(value="")
+        self.ratio_model_var = tk.StringVar(value="")
+        self.trained_models = {}
+        self.progress_var = tk.DoubleVar(value=0.0)
         self._canvas_interactions = {}
 
+        self._setup_matplotlib_defaults()
         self._configure_style()
         self._build_layout()
         self._populate_model_list()
@@ -277,47 +282,6 @@ class ModelWorkbenchGUI:
         except Exception:
             pass
 
-    def _resolve_hover_artist_color(self, artist, point_index=None):
-        try:
-            if point_index is not None and hasattr(artist, "get_array") and hasattr(artist, "cmap") and hasattr(artist, "norm"):
-                values = artist.get_array()
-                if values is not None:
-                    values = np.asarray(values)
-                    if 0 <= point_index < len(values):
-                        return artist.cmap(artist.norm(values[point_index]))
-
-            if hasattr(artist, "get_facecolors"):
-                facecolors = artist.get_facecolors()
-                if facecolors is not None and len(facecolors):
-                    if point_index is not None and 0 <= point_index < len(facecolors):
-                        return tuple(facecolors[point_index])
-                    return tuple(facecolors[0])
-
-            if hasattr(artist, "get_facecolor"):
-                facecolor = artist.get_facecolor()
-                if facecolor is not None:
-                    facecolor = np.asarray(facecolor)
-                    if facecolor.ndim == 2 and len(facecolor):
-                        return tuple(facecolor[0])
-                    if facecolor.ndim == 1 and len(facecolor):
-                        return tuple(facecolor)
-        except Exception:
-            pass
-        return None
-
-    def _set_hover_annotation_color(self, annotation, rgba_color):
-        if rgba_color is None:
-            return
-        rgba = np.asarray(rgba_color, dtype=float)
-        if rgba.size < 4:
-            rgba = np.append(rgba[:3], 1.0)
-        alpha = float(rgba[3]) if rgba.size > 3 else 1.0
-        box_color = (float(rgba[0]), float(rgba[1]), float(rgba[2]), max(0.75, min(alpha, 0.97)))
-        annotation.get_bbox_patch().set_facecolor(box_color)
-        annotation.get_bbox_patch().set_edgecolor(box_color)
-        luminance = 0.299 * float(rgba[0]) + 0.587 * float(rgba[1]) + 0.114 * float(rgba[2])
-        annotation.set_color("black" if luminance > 0.68 else "white")
-
     def _find_hover_text(self, canvas, event):
         ax = event.inaxes
         if ax is None:
@@ -337,15 +301,13 @@ class ModelWorkbenchGUI:
                 continue
             if has_multi:
                 indices = info.get("ind", []) if isinstance(info, dict) else []
-                if indices:
+                if len(indices) > 0:
                     texts = getattr(artist, "_hover_texts", [])
                     idx = int(indices[0])
                     if 0 <= idx < len(texts):
-                        return {"text": texts[idx], "artist": artist, "index": idx}
+                        return texts[idx]
                 continue
-            text = getattr(artist, "_hover_text", None)
-            if text is not None:
-                return {"text": text, "artist": artist, "index": None}
+            return getattr(artist, "_hover_text", None)
         return None
 
     def _handle_hover_event(self, canvas, event):
@@ -355,11 +317,17 @@ class ModelWorkbenchGUI:
         if event.inaxes is None:
             self._hide_hover_annotation(canvas)
             return
-        hover_info = self._find_hover_text(canvas, event)
-        if not hover_info:
+
+        # Selection cursor: use arrow for 'Auto' mode, crosshair for manual selection/zoom
+        if canvas == getattr(self, "pred_canvas", None) and self.prediction_axis_auto_var.get():
+            canvas.get_tk_widget().configure(cursor="arrow")
+        else:
+            canvas.get_tk_widget().configure(cursor="crosshair")
+
+        text = self._find_hover_text(canvas, event)
+        if not text:
             self._hide_hover_annotation(canvas)
             return
-        text = hover_info["text"]
         if state["annotation"] is None or state["annotation"].axes is not event.inaxes:
             self._hide_hover_annotation(canvas)
             state["annotation"] = event.inaxes.annotate(
@@ -374,8 +342,6 @@ class ModelWorkbenchGUI:
                 va="bottom",
             )
         annotation = state["annotation"]
-        point_color = self._resolve_hover_artist_color(hover_info.get("artist"), hover_info.get("index"))
-        self._set_hover_annotation_color(annotation, point_color)
         x = event.xdata if event.xdata is not None else 0.0
         y = event.ydata if event.ydata is not None else 0.0
         annotation.xy = (x, y)
@@ -388,6 +354,11 @@ class ModelWorkbenchGUI:
         state = self._canvas_interactions.get(canvas)
         if state is None:
             return
+        # Reset cursor to default
+        try:
+            canvas.get_tk_widget().configure(cursor="")
+        except Exception:
+            pass
         annotation = state.get("annotation")
         if annotation is not None and annotation.get_visible():
             annotation.set_visible(False)
@@ -515,6 +486,12 @@ class ModelWorkbenchGUI:
     def _build_ratio_mode_controls(self, parent):
         for child in parent.winfo_children():
             child.destroy()
+        
+        ttk.Label(parent, text="Model:").pack(side="left", padx=(0, 4))
+        self.ratio_model_combo = ttk.Combobox(parent, textvariable=self.ratio_model_var, state="readonly", width=18)
+        self.ratio_model_combo.pack(side="left", padx=(0, 10))
+        self.ratio_model_combo.bind("<<ComboboxSelected>>", lambda e: self._on_ratio_mode_change())
+
         ttk.Label(parent, text="View:").pack(side="left", padx=(0, 6))
 
         for mode in ("2D", "3D"):
@@ -530,18 +507,14 @@ class ModelWorkbenchGUI:
         for child in parent.winfo_children():
             child.destroy()
 
-        # layout using grid so controls wrap nicely when the header shrinks
+        # Use tk.Checkbutton for native checkmark symbol
         chk = tk.Checkbutton(
             parent,
             text="Auto from dataset",
             variable=self.prediction_axis_auto_var,
             command=self._on_prediction_axis_change,
             anchor="w",
-            bg="#efefef",
-            activebackground="#efefef",
             relief="flat",
-            highlightthickness=0,
-            selectcolor="#efefef",
         )
         chk.grid(row=0, column=0, columnspan=4, sticky="w", padx=(2, 6), pady=(0, 6))
 
@@ -765,22 +738,58 @@ class ModelWorkbenchGUI:
                 selected.append(name)
         return selected
 
+    def _setup_matplotlib_defaults(self):
+        """Sets global Matplotlib parameters for professional, research-ready visuals."""
+        plt.rcParams.update({
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Segoe UI", "Arial", "Helvetica", "DejaVu Sans"],
+            "axes.labelsize": 10,
+            "axes.titlesize": 11,
+            "axes.titleweight": "bold",
+            "xtick.labelsize": 9,
+            "ytick.labelsize": 9,
+            "legend.fontsize": 8,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "grid.alpha": 0.25,
+            "grid.linestyle": "--",
+            "figure.facecolor": "#ffffff",
+            "savefig.dpi": 300,
+            "figure.constrained_layout.use": False,
+            "figure.autolayout": False
+        })
+
     def _configure_style(self):
         style = ttk.Style()
-        if "clam" in style.theme_names():
-            style.theme_use("clam")
+        # Use native theme where possible
+        if "vista" in style.theme_names():
+            style.theme_use("vista")
+        elif "xpnative" in style.theme_names():
+            style.theme_use("xpnative")
 
-        style.configure("Title.TLabel", font=("Segoe UI", 14, "bold"))
-        style.configure("Subtitle.TLabel", font=("Segoe UI", 10, "bold"))
-        style.configure("Info.TLabel", font=("Segoe UI", 10))
+        # Professional Color Palette
+        bg_main = "#f8fafc"  # Very light grey-blue
+        accent_blue = "#1e40af" # Deep blue
+        
+        style.configure("TFrame", background=bg_main)
+        style.configure("TLabel", background=bg_main, font=("Segoe UI", 10))
+        
+        style.configure("Title.TLabel", font=("Segoe UI", 16, "bold"), foreground=accent_blue)
+        style.configure("Subtitle.TLabel", font=("Segoe UI", 10, "bold"), foreground="#334155")
+        style.configure("Info.TLabel", font=("Segoe UI", 9), foreground="#64748b")
+        
         style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"))
-        style.configure("Control.TLabelframe", background="#efefef")
-        style.configure("Control.TLabelframe.Label", font=("Segoe UI", 10, "bold"), foreground="#222222")
-        style.configure("ControlHeading.TLabel", font=("Segoe UI", 16, "bold"), foreground="#1f1f1f")
-        style.configure("SectionTitle.TLabel", font=("Segoe UI", 9, "bold"), foreground="#222222")
-        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"))
-        style.configure("Primary.TButton", background="#2e73b8", foreground="white")
-        style.map("Primary.TButton", background=[("active", "#215d99")], foreground=[("active", "white")])
+        
+        style.configure("Control.TLabelframe", background="#ffffff", relief="solid", borderwidth=1)
+        style.configure("Control.TLabelframe.Label", font=("Segoe UI", 10, "bold"), foreground="#1e293b")
+        
+        style.configure("ControlHeading.TLabel", font=("Segoe UI", 14, "bold"), foreground="#0f172a")
+        
+        # Treeview (Results Table)
+        style.configure("Treeview", font=("Segoe UI", 9), rowheight=26)
+        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
+        
+        style.configure("Horizontal.TProgressbar", thickness=10)
 
     def _build_layout(self):
         top = ttk.Frame(self.root, padding=12)
@@ -847,6 +856,12 @@ class ModelWorkbenchGUI:
 
         self.model_check_frame = tk.Frame(models_box, bg="#f9f9f9", bd=1, relief="solid")
         self.model_check_frame.pack(fill="both", expand=True)
+
+        model_io_box = ttk.LabelFrame(left_panel, text="MODEL MANAGEMENT", style="Control.TLabelframe", padding=8)
+        model_io_box.pack(fill="x", pady=(0, 8))
+        
+        ttk.Button(model_io_box, text="Save Trained Model", command=self._save_model).pack(fill="x", pady=2)
+        ttk.Button(model_io_box, text="Load External Model", command=self._load_model).pack(fill="x", pady=2)
 
         guide_box = ttk.LabelFrame(left_panel, text="QUICK START GUIDE", style="Control.TLabelframe", padding=8)
         guide_box.pack(fill="both", expand=True)
@@ -970,8 +985,7 @@ class ModelWorkbenchGUI:
         columns = ("Model", "R2", "RMSE", "MSE", "MAE")
         self.results_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=14)
         for col in columns:
-            heading_text = "r^2" if col == "R2" else col
-            self.results_table.heading(col, text=heading_text)
+            self.results_table.heading(col, text=col)
             self.results_table.column(col, anchor="center", width=160)
         self.results_table.pack(side="left", fill="both", expand=True)
 
@@ -982,12 +996,11 @@ class ModelWorkbenchGUI:
         ratio_table_frame = ttk.Frame(ratio_tab, padding=8)
         ratio_table_frame.pack(fill="x")
 
-        ratio_columns = ("Ratio", "R2", "RMSE", "MSE", "MAE")
+        ratio_columns = ("Model", "Ratio", "R2", "RMSE", "MSE", "MAE")
         self.ratio_results_table = ttk.Treeview(ratio_table_frame, columns=ratio_columns, show="headings", height=6)
         for col in ratio_columns:
-            heading_text = "r^2" if col == "R2" else col
-            self.ratio_results_table.heading(col, text=heading_text)
-            self.ratio_results_table.column(col, anchor="center", width=180)
+            self.ratio_results_table.heading(col, text=col)
+            self.ratio_results_table.column(col, anchor="center", width=140)
         self.ratio_results_table.pack(side="left", fill="x", expand=True)
 
         ratio_scroll = ttk.Scrollbar(ratio_table_frame, orient="vertical", command=self.ratio_results_table.yview)
@@ -1008,11 +1021,14 @@ class ModelWorkbenchGUI:
         self._enable_canvas_interactions(self.ratio_canvas)
         self._add_canvas_toolbar(ratio_toolbar_holder, self.ratio_canvas)
 
-        self.output_text = tk.Text(output_tab, wrap="none", relief="solid", borderwidth=1)
-        self.output_text.pack(fill="both", expand=True, padx=8, pady=8)
+        status_container = ttk.Frame(self.root, padding=(12, 4))
+        status_container.pack(fill="x", side="bottom")
 
-        status = ttk.Label(self.root, textvariable=self.status_text, style="Info.TLabel", padding=(12, 6))
-        status.pack(fill="x", side="bottom")
+        self.progress_bar = ttk.Progressbar(status_container, variable=self.progress_var, maximum=100, style="Horizontal.TProgressbar")
+        self.progress_bar.pack(fill="x", pady=(0, 2))
+
+        status = ttk.Label(status_container, textvariable=self.status_text, style="Info.TLabel")
+        status.pack(fill="x")
 
         self._draw_empty_graphs()
         # initialize selectors (store default limits)
@@ -1137,8 +1153,18 @@ class ModelWorkbenchGUI:
         # All bar value labels disabled - users can hover to see values
         return
 
-    def _annotate_vertical_bars(self, ax, values, offset=0.002, fmt="{:.4f}", fontsize=8):
-        # All bar value labels disabled - users can hover to see values
+    def _annotate_vertical_bars(self, ax, bars, fmt="{:.4f}", fontsize=7):
+        for bar in bars:
+            height = bar.get_height()
+            if abs(height) < 1e-9: continue
+            ax.annotate(
+                fmt.format(height),
+                xy=(bar.get_x() + bar.get_width() / 2, height),
+                xytext=(0, 3),
+                textcoords="offset points",
+                ha='center', va='bottom', fontsize=fontsize, alpha=0.9,
+                rotation=90
+            )
         return
 
     def _render_model_comparison_figure(self, figure, empty=False):
@@ -1176,13 +1202,19 @@ class ModelWorkbenchGUI:
         }
 
         ax = figure.add_subplot(111)
-        bars_r2 = ax.bar(x + offsets["R2"], r2_vals, width=width, color="#3d8ec9", edgecolor="#2b2b2b", linewidth=0.25, label="r^2")
+        bars_r2 = ax.bar(x + offsets["R2"], r2_vals, width=width, color="#3d8ec9", edgecolor="#2b2b2b", linewidth=0.25, label="R2")
         bars_rmse = ax.bar(x + offsets["RMSE"], rmse_vals, width=width, color="#f4a259", edgecolor="#2b2b2b", linewidth=0.25, label="RMSE")
         bars_mse = ax.bar(x + offsets["MSE"], mse_vals, width=width, color="#74c476", edgecolor="#2b2b2b", linewidth=0.25, label="MSE")
         bars_mae = ax.bar(x + offsets["MAE"], mae_vals, width=width, color="#9c89b8", edgecolor="#2b2b2b", linewidth=0.25, label="MAE")
 
+        # Add value labels
+        self._annotate_vertical_bars(ax, bars_r2)
+        self._annotate_vertical_bars(ax, bars_rmse)
+        self._annotate_vertical_bars(ax, bars_mse)
+        self._annotate_vertical_bars(ax, bars_mae)
+
         for model_name, value, bar in zip(models, r2_vals, bars_r2):
-            self._set_hover_data(bar, text=f"Model: {model_name}\nr^2: {value:.6f}")
+            self._set_hover_data(bar, text=f"Model: {model_name}\nR2: {value:.6f}")
         for model_name, value, bar in zip(models, rmse_vals, bars_rmse):
             self._set_hover_data(bar, text=f"Model: {model_name}\nRMSE: {value:.6f}")
         for model_name, value, bar in zip(models, mse_vals, bars_mse):
@@ -1190,11 +1222,10 @@ class ModelWorkbenchGUI:
         for model_name, value, bar in zip(models, mae_vals, bars_mae):
             self._set_hover_data(bar, text=f"Model: {model_name}\nMAE: {value:.6f}")
 
-        # highlight best model by R2 (same as ranking criterion)
-        ax.axvspan(best_idx - 0.5, best_idx + 0.5, color="#f8f3d4", alpha=0.45, zorder=0)
+        # best model highlight removed for research suitability
 
         all_vals = np.concatenate([r2_vals, rmse_vals, mse_vals, mae_vals])
-        y_top = max(1.0, float(np.max(all_vals)) * 1.2)
+        y_top = max(1.0, float(np.max(all_vals)) * 1.35)
         ax.set_ylim(0.0, y_top)
         ax.set_xlim(-0.6, len(models) - 0.4)
         ax.set_xticks(x)
@@ -1207,11 +1238,11 @@ class ModelWorkbenchGUI:
         ax.set_xlabel("Models", fontweight="bold")
         ax.set_ylabel("Metric Value", fontweight="bold")
         ax.grid(axis="y", linestyle="--", alpha=0.22)
-        ax.legend(loc="upper right", ncol=4, fontsize=8)
+        ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), ncol=1, fontsize=8)
 
         # Apply tight layout to avoid label clipping
         try:
-            figure.tight_layout()
+            figure.tight_layout(rect=[0, 0, 0.85, 1])
         except Exception:
             pass
 
@@ -1239,7 +1270,7 @@ class ModelWorkbenchGUI:
             best_idx,
             "Blues",
             f"Model Accuracy Comparison (3D)\n{best_row['Model']}: {best_row['R2'] * 100:.2f}%",
-            "r^2 Score (%)",
+            "R² Score (%)",
         )
 
         self._plot_3d_metric_bars(
@@ -1283,7 +1314,7 @@ class ModelWorkbenchGUI:
     def _draw_model_reference_box(self, ax, models, r2_values, rmse_values, mse_values, mae_values):
         items = []
         for idx, (name, r2_value, rmse_value, mse_value, mae_value) in enumerate(zip(models, r2_values, rmse_values, mse_values, mae_values), 1):
-            items.append(f"{idx}. {name} | r^2={r2_value:.2f}% | RMSE={rmse_value:.6f} | MSE={mse_value:.6f} | MAE={mae_value:.6f}")
+            items.append(f"{idx}. {name} | R2={r2_value:.2f}% | RMSE={rmse_value:.6f} | MSE={mse_value:.6f} | MAE={mae_value:.6f}")
 
         col_count = 3
         rows = int(math.ceil(len(items) / col_count))
@@ -1435,18 +1466,16 @@ class ModelWorkbenchGUI:
             ax.set_xlim(x_low, x_high)
             ax.set_ylim(y_low, y_high)
             metric_row = self.metrics_df[self.metrics_df["Model"] == name].iloc[0]
-            ax.set_title(
-                f"{name} | r^2={metric_row['R2']:.4f} | RMSE={metric_row['RMSE']:.4f} | MSE={metric_row['MSE']:.4f} | MAE={metric_row['MAE']:.4f}"
-            )
+            ax.set_title(f"{name}", fontweight="bold")
 
             subplot_label = chr(96 + idx) if idx <= 26 else str(idx)
             ax.text(
-                0.03,
-                0.96,
+                -0.08,
+                1.02,
                 f"({subplot_label})",
                 transform=ax.transAxes,
-                ha="left",
-                va="top",
+                ha="right",
+                va="bottom",
                 fontsize=12,
                 fontweight="bold",
                 bbox=dict(boxstyle="round,pad=0.18", facecolor="white", edgecolor="#999999", alpha=0.8),
@@ -1457,13 +1486,21 @@ class ModelWorkbenchGUI:
             ax.set_xlabel(f"Actual{x_unit_suffix}")
             ax.set_ylabel(f"Predicted{y_unit_suffix}")
 
+            box_text = (
+                f"X [{x_low:.4f}, {x_high:.4f}]{x_unit_suffix}\n"
+                f"Y [{y_low:.4f}, {y_high:.4f}]{y_unit_suffix}\n"
+                f"R² = {metric_row['R2']:.4f}\n"
+                f"RMSE = {metric_row['RMSE']:.4f}\n"
+                f"MSE = {metric_row['MSE']:.4f}\n"
+                f"MAE = {metric_row['MAE']:.4f}"
+            )
             ax.text(
                 0.03,
-                0.03,
-                f"X [{x_low:.4f}, {x_high:.4f}]{x_unit_suffix}\nY [{y_low:.4f}, {y_high:.4f}]{y_unit_suffix}",
+                0.86,
+                box_text,
                 transform=ax.transAxes,
                 ha="left",
-                va="bottom",
+                va="top",
                 fontsize=8.3,
                 color="#222222",
                 bbox=dict(boxstyle="round,pad=0.22", facecolor="white", edgecolor="#bbbbbb", alpha=0.85),
@@ -1478,9 +1515,27 @@ class ModelWorkbenchGUI:
         if isinstance(value, (int, np.integer)):
             return str(value)
         if isinstance(value, (float, np.floating)):
-            if abs(value) >= 10000 or (0 < abs(value) < 0.001):
+            if value == 0:
+                return "0"
+            abs_val = abs(value)
+            if abs_val >= 1e9:
+                return f"{value / 1e9:.2f} G"
+            elif abs_val >= 1e6:
+                return f"{value / 1e6:.2f} M"
+            elif abs_val >= 1e3:
+                return f"{value / 1e3:.2f} k"
+            elif abs_val >= 1.0:
+                return f"{value:.4f}".rstrip("0").rstrip(".")
+            elif abs_val >= 1e-3:
+                return f"{value * 1e3:.2f} milli"
+            elif abs_val >= 1e-6:
+                return f"{value * 1e6:.2f} micro"
+            elif abs_val >= 1e-9:
+                return f"{value * 1e9:.2f} nano"
+            elif abs_val >= 1e-12:
+                return f"{value * 1e12:.2f} pico"
+            else:
                 return f"{value:.2e}"
-            return f"{value:.4f}".rstrip("0").rstrip(".")
         return str(value)
 
     def _format_combination_name(self, row, feature_cols):
@@ -1812,7 +1867,7 @@ class ModelWorkbenchGUI:
             details = [f"{col}: {self._format_feature_value(row[col])}" for col in feature_cols]
             tooltip = f"Rank: C{rank}\nActual: {row['Actual']:.6f}\n" + "\n".join(details)
             self._set_hover_data(bar, text=tooltip)
-        self._annotate_vertical_bars(ax_bar, values, offset=0.004, fmt="{:.4f}", fontsize=9)
+        self._annotate_vertical_bars(ax_bar, bars, fmt="{:.4f}", fontsize=9)
         ax_bar.set_title(f"Dataset Top 10 - Best {self.dataset_target_col} Values", fontsize=12, fontweight="bold")
         ax_bar.set_xlabel("Combination Rank")
         ax_bar.set_ylabel(f"Actual {self.dataset_target_col}")
@@ -1979,28 +2034,223 @@ class ModelWorkbenchGUI:
             "Predicted": pd.Series(y_pred),
             "Residual": y_test.reset_index(drop=True) - pd.Series(y_pred),
         })
+        
+        # store trained model for saving later
+        self.trained_models[model_name] = pipeline
+        
         return pipeline, metrics, pred_df
 
-    def _run_ratio_analysis(self, X, y, model_name, train_sizes):
+    def _save_model(self):
+        """
+        Allows users to save selected trained models into .pkl files using joblib.
+        """
+        if not self.trained_models:
+            messagebox.showwarning("No Models", "No models have been trained yet. Please run models first.")
+            return
+
+        # Let user choose which model to save if multiple exist
+        model_names = list(self.trained_models.keys())
+        if len(model_names) > 1:
+            # Create an improved selection dialog
+            select_win = tk.Toplevel(self.root)
+            select_win.title("Select Model(s) to Save")
+            select_win.geometry("380x480")
+            select_win.transient(self.root)
+            select_win.grab_set()
+
+            ttk.Label(select_win, text="Select models to export:", font=("Segoe UI", 10, "bold")).pack(pady=(15, 5))
+            ttk.Label(select_win, text="Tip: Use Ctrl+A or Click + Drag to select multiple", font=("Segoe UI", 8, "italic")).pack(pady=(0, 10))
+            
+            lb = tk.Listbox(select_win, font=("Segoe UI", 10), selectmode="extended", borderwidth=1, relief="solid")
+            lb.pack(fill="both", expand=True, padx=15, pady=5)
+            for m in model_names:
+                lb.insert("end", m)
+            
+            # Pre-select all to make it easier for user
+            lb.selection_set(0, "end")
+
+            def select_all_action(event=None):
+                lb.selection_set(0, "end")
+                return "break"
+
+            # Bind Ctrl+A
+            lb.bind("<Control-a>", select_all_action)
+            lb.bind("<Control-A>", select_all_action)
+
+            btn_frame = ttk.Frame(select_win)
+            btn_frame.pack(fill="x", padx=15, pady=20)
+
+            def do_save():
+                indices = lb.curselection()
+                if not indices:
+                    messagebox.showwarning("No Selection", "Please select at least one model to save.")
+                    return
+                
+                selected = [lb.get(i) for i in indices]
+                select_win.destroy()
+                
+                if len(selected) == 1:
+                    # Single file save
+                    self._execute_save_dump(selected[0])
+                else:
+                    # Batch folder save
+                    self._execute_batch_save(selected)
+
+            ttk.Button(btn_frame, text="Select All (Ctrl+A)", command=select_all_action).pack(side="left", expand=True, fill="x", padx=2)
+            ttk.Button(btn_frame, text="Save Selected", command=do_save, style="Accent.TButton").pack(side="left", expand=True, fill="x", padx=2)
+        else:
+            self._execute_save_dump(model_names[0])
+
+    def _execute_batch_save(self, model_names):
+        """
+        Saves multiple models into a selected directory.
+        """
+        try:
+            target_dir = filedialog.askdirectory(title="Select Folder to Save Multiple Models")
+            if not target_dir:
+                return
+            
+            target_path = Path(target_dir)
+            saved_count = 0
+            for name in model_names:
+                model = self.trained_models[name]
+                file_name = f"{name.replace(' ', '_')}_model.pkl"
+                # saving each model using joblib
+                joblib.dump(model, target_path / file_name)
+                saved_count += 1
+            
+            self.status_text.set(f"Successfully saved {saved_count} models to folder: {target_path.name}")
+            messagebox.showinfo("Batch Save Success", f"Successfully saved {saved_count} models to:\n{target_dir}")
+        except Exception as e:
+            self.status_text.set(f"Batch save failed: {str(e)}")
+            messagebox.showerror("Save Error", f"Could not save models:\n{str(e)}")
+
+    def _execute_save_dump(self, model_name):
+        try:
+            path = filedialog.asksaveasfilename(
+                defaultextension=".pkl",
+                filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")],
+                initialfile=f"{model_name.replace(' ', '_')}_model.pkl"
+            )
+            if not path:
+                return
+
+            model = self.trained_models[model_name]
+            # saving model using joblib
+            joblib.dump(model, path)
+            
+            self.status_text.set(f"Successfully saved {model_name} to {Path(path).name}")
+            messagebox.showinfo("Success", f"Model '{model_name}' saved successfully!")
+        except Exception as e:
+            self.status_text.set(f"Failed to save model: {str(e)}")
+            messagebox.showerror("Save Error", f"Could not save model:\n{str(e)}")
+
+    def _load_model(self):
+        """
+        Loads a .pkl model file using joblib and integrates it into the application memory.
+        """
+        try:
+            path = filedialog.askopenfilename(
+                filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")]
+            )
+            if not path:
+                return
+
+            # loading model using joblib
+            loaded_pipeline = joblib.load(path)
+            
+            # Check if it's a valid sklearn pipeline or model (basic check)
+            if not hasattr(loaded_pipeline, "predict"):
+                raise ValueError("The selected file does not appear to be a valid machine learning model.")
+
+            model_name = f"Loaded_{Path(path).stem}"
+            self.trained_models[model_name] = loaded_pipeline
+            
+            self.status_text.set(f"Successfully loaded model: {model_name}")
+            
+            # If a dataset is currently loaded, allow prediction without retraining
+            if not self.dataset_path.get() or not Path(self.dataset_path.get()).exists():
+                messagebox.showinfo("Model Loaded", f"Model '{model_name}' loaded successfully.\n\nTo see results, please load a dataset.")
+                return
+
+            # Try to integrate loaded model with existing prediction workflow
+            self._run_inference_on_loaded_model(model_name, loaded_pipeline)
+            
+            messagebox.showinfo("Success", f"Model '{model_name}' loaded and integrated with current data!")
+            
+        except Exception as e:
+            self.status_text.set(f"Failed to load model: {str(e)}")
+            messagebox.showerror("Load Error", f"Invalid or corrupted model file:\n{str(e)}")
+
+    def _run_inference_on_loaded_model(self, name, pipeline):
+        """
+        Prediction using loaded model on current dataset.
+        """
+        try:
+            df = self._load_dataset(self.dataset_path.get())
+            X, y, target_col, feature_cols = self._get_features_and_target(df)
+            
+            # We use the current test split if possible, or just the whole set
+            # For consistency with the GUI workflow, we'll do a fresh split with RANDOM_STATE
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=float(self.test_size_value), random_state=RANDOM_STATE
+            )
+
+            y_pred = pipeline.predict(X_test)
+            metrics = self._compute_regression_metrics(y_test, y_pred)
+            
+            pred_df = pd.DataFrame({
+                "Actual": y_test.reset_index(drop=True),
+                "Predicted": pd.Series(y_pred),
+                "Residual": y_test.reset_index(drop=True) - pd.Series(y_pred),
+            })
+
+            # Update application state
+            if self.metrics_df.empty:
+                self.metrics_df = pd.DataFrame([{
+                    "Model": name, "R2": metrics["R2"], "RMSE": metrics["RMSE"], "MSE": metrics["MSE"], "MAE": metrics["MAE"]
+                }])
+            else:
+                # Remove if already exists with same name
+                self.metrics_df = self.metrics_df[self.metrics_df["Model"] != name]
+                new_row = pd.DataFrame([{
+                    "Model": name, "R2": metrics["R2"], "RMSE": metrics["RMSE"], "MSE": metrics["MSE"], "MAE": metrics["MAE"]
+                }])
+                self.metrics_df = pd.concat([self.metrics_df, new_row], ignore_index=True).sort_values("R2", ascending=False)
+            
+            self.prediction_frames[name] = pred_df
+            
+            # Update GUI
+            self._refresh_model_filters()
+            self._update_results_table()
+            self._update_metric_charts()
+            self._update_prediction_chart()
+            
+        except Exception as e:
+            messagebox.showwarning("Inference Warning", f"Model loaded but could not run on current data:\n{str(e)}\n\nEnsure features match.")
+
+    def _run_ratio_analysis(self, X, y, model_names, train_sizes):
         rows = []
 
-        for train_size in train_sizes:
-            X_train, X_test, y_train, y_test = train_test_split(
-                X,
-                y,
-                test_size=(1.0 - train_size),
-                random_state=RANDOM_STATE,
-            )
-            _, metrics, _ = self._train_single_model(model_name, X_train, X_test, y_train, y_test)
-            ratio_text = self._ratio_label(train_size)
-            rows.append({
-                "Ratio": ratio_text,
-                "TrainSize": train_size,
-                "R2": metrics["R2"],
-                "RMSE": metrics["RMSE"],
-                "MSE": metrics["MSE"],
-                "MAE": metrics["MAE"],
-            })
+        for model_name in model_names:
+            for train_size in train_sizes:
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X,
+                    y,
+                    test_size=(1.0 - train_size),
+                    random_state=RANDOM_STATE,
+                )
+                _, metrics, _ = self._train_single_model(model_name, X_train, X_test, y_train, y_test)
+                ratio_text = self._ratio_label(train_size)
+                rows.append({
+                    "Model": model_name,
+                    "Ratio": ratio_text,
+                    "TrainSize": train_size,
+                    "R2": metrics["R2"],
+                    "RMSE": metrics["RMSE"],
+                    "MSE": metrics["MSE"],
+                    "MAE": metrics["MAE"],
+                })
 
         ratio_df = pd.DataFrame(rows)
         return ratio_df
@@ -2010,38 +2260,48 @@ class ModelWorkbenchGUI:
 
         if empty or self.ratio_metrics_df.empty:
             ax = figure.add_subplot(111)
-            ax.text(0.5, 0.5, "Run models to see ratio-based r^2 and RMSE analysis", ha="center", va="center", fontsize=12)
+            ax.text(0.5, 0.5, "Run models to see ratio-based R2 and RMSE analysis", ha="center", va="center", fontsize=12)
             ax.axis("off")
             return
 
-        ratio_labels = self.ratio_metrics_df["Ratio"].tolist()
-        r2_vals = self.ratio_metrics_df["R2"].to_numpy(dtype=float)
-        rmse_vals = self.ratio_metrics_df["RMSE"].to_numpy(dtype=float)
-        mse_vals = self.ratio_metrics_df["MSE"].to_numpy(dtype=float)
-        mae_vals = self.ratio_metrics_df["MAE"].to_numpy(dtype=float)
+        selected_model = self.ratio_model_var.get()
+        if not selected_model or selected_model not in self.ratio_metrics_df["Model"].unique():
+            selected_model = self.ratio_metrics_df["Model"].unique()[0]
+            self.ratio_model_var.set(selected_model)
+
+        plot_df = self.ratio_metrics_df[self.ratio_metrics_df["Model"] == selected_model].copy()
+        
+        ratio_labels = plot_df["Ratio"].tolist()
+        r2_vals = plot_df["R2"].to_numpy(dtype=float)
+        rmse_vals = plot_df["RMSE"].to_numpy(dtype=float)
+        mse_vals = plot_df["MSE"].to_numpy(dtype=float)
+        mae_vals = plot_df["MAE"].to_numpy(dtype=float)
 
         if self.ratio_mode_var.get() == "2D":
             x = np.arange(len(ratio_labels), dtype=float)
             metrics = [
-                ("r^2", r2_vals, "#2a9d8f"),
-                ("RMSE", rmse_vals, "#e76f51"),
-                ("MSE", mse_vals, "#3a86ff"),
-                ("MAE", mae_vals, "#8338ec"),
+                ("R2", r2_vals, "#3d8ec9"),
+                ("RMSE", rmse_vals, "#f4a259"),
+                ("MSE", mse_vals, "#74c476"),
+                ("MAE", mae_vals, "#9c89b8"),
             ]
             width = 0.18
-
+            
             ax = figure.add_subplot(111)
+            # best ratio highlight removed for research suitability
             all_vals = np.concatenate([r2_vals, rmse_vals, mse_vals, mae_vals])
-
+            y_top = max(float(np.max(all_vals)) * 1.35, 1.0)
+            ax.set_ylim(0.0, y_top)
             for idx, (metric_name, metric_vals, metric_color) in enumerate(metrics):
                 offset = (idx - 1.5) * width
                 bars = ax.bar(x + offset, metric_vals, width=width, color=metric_color, label=metric_name, edgecolor="#2b2b2b", linewidth=0.25)
+                self._annotate_vertical_bars(ax, bars)
                 self._set_hover_data(
                     bars,
                     texts=[f"Ratio: {label}\n{metric_name}: {value:.6f}" for label, value in zip(ratio_labels, metric_vals)],
                 )
 
-            ax.set_title("Model Performance vs Train-Test Ratio", fontweight="bold", pad=10)
+            ax.set_title(f"Ratio Analysis - {selected_model}", fontweight="bold", pad=10)
             ax.set_xlabel("Train-Test Ratio")
             ax.set_ylabel("Metric Value")
 
@@ -2051,9 +2311,9 @@ class ModelWorkbenchGUI:
             ax.set_ylim(0.0, y_top)
 
             ax.grid(axis="both", linestyle="--", alpha=0.25)
-            ax.legend(loc="upper right")
+            ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5))
 
-            figure.tight_layout()
+            figure.tight_layout(rect=[0, 0, 0.85, 1])
             return
 
         ax = figure.add_subplot(111, projection="3d")
@@ -2062,7 +2322,7 @@ class ModelWorkbenchGUI:
         dx = np.full(len(ratio_labels), 0.38, dtype=float)
         dy = np.full(len(ratio_labels), 0.35, dtype=float)
         metric_specs = [
-            ("r^2", r2_vals, "#2a9d8f", 0.0),
+            ("R2", r2_vals, "#2a9d8f", 0.0),
             ("RMSE", rmse_vals, "#e76f51", 1.0),
             ("MSE", mse_vals, "#3a86ff", 2.0),
             ("MAE", mae_vals, "#8338ec", 3.0),
@@ -2097,7 +2357,7 @@ class ModelWorkbenchGUI:
         except Exception:
             pass
 
-        ax.set_title("Model Performance vs Train-Test Ratio", fontweight="bold", pad=16)
+        ax.set_title(f"Ratio Analysis - {selected_model}", fontweight="bold", pad=16)
         ax.set_xlabel("Train-Test Ratio", labelpad=10)
         ax.set_ylabel("Metrics", labelpad=10)
         ax.set_zlabel("Values", labelpad=10)
@@ -2105,21 +2365,21 @@ class ModelWorkbenchGUI:
         ax.set_xticks(x + dx / 2)
         ax.set_xticklabels(ratio_labels)
         ax.set_yticks([0 + dy[0] / 2, 1 + dy[0] / 2, 2 + dy[0] / 2, 3 + dy[0] / 2])
-        ax.set_yticklabels(["r^2", "RMSE", "MSE", "MAE"])
+        ax.set_yticklabels(["R2", "RMSE", "MSE", "MAE"])
         ax.view_init(elev=23, azim=-58)
 
         from matplotlib.patches import Patch
         legend_handles = [
-            Patch(facecolor="#2a9d8f", edgecolor="#222222", label="r^2"),
+            Patch(facecolor="#2a9d8f", edgecolor="#222222", label="R2"),
             Patch(facecolor="#e76f51", edgecolor="#222222", label="RMSE"),
             Patch(facecolor="#3a86ff", edgecolor="#222222", label="MSE"),
             Patch(facecolor="#8338ec", edgecolor="#222222", label="MAE"),
         ]
-        ax.legend(handles=legend_handles, loc="upper left", bbox_to_anchor=(0.02, 0.98))
+        ax.legend(handles=legend_handles, loc="center left", bbox_to_anchor=(1.05, 0.5))
 
         z_max = max(float(np.max(r2_vals)), float(np.max(rmse_vals)), float(np.max(mse_vals)), float(np.max(mae_vals)))
         ax.set_zlim(0, max(z_max * 1.15, 1.0))
-        figure.subplots_adjust(left=0.05, right=0.98, top=0.92, bottom=0.08)
+        figure.subplots_adjust(left=0.05, right=0.82, top=0.92, bottom=0.08)
 
     def _update_ratio_results_table(self):
         for item in self.ratio_results_table.get_children():
@@ -2130,6 +2390,7 @@ class ModelWorkbenchGUI:
                 "",
                 "end",
                 values=(
+                    row["Model"],
                     row["Ratio"],
                     f"{row['R2']:.6f}",
                     f"{row['RMSE']:.6f}",
@@ -2145,6 +2406,9 @@ class ModelWorkbenchGUI:
             messagebox.showwarning("No Model Selected", "Please select at least one model.")
             return
 
+        self.progress_var.set(5)
+        self.root.update_idletasks()
+
         LIGHTGBM_FALLBACK_MESSAGE = None
         XGBOOST_FALLBACK_MESSAGE = None
 
@@ -2154,6 +2418,7 @@ class ModelWorkbenchGUI:
             if round(self.train_size_value, 4) not in requested_train_sizes:
                 requested_train_sizes.insert(0, round(self.train_size_value, 4))
 
+            self.progress_var.set(15)
             df = self._load_dataset(self.dataset_path.get())
             X, y, target_col, feature_cols = self._get_features_and_target(df)
 
@@ -2163,12 +2428,17 @@ class ModelWorkbenchGUI:
                 test_size=float(self.test_size_value),
                 random_state=RANDOM_STATE,
             )
+            self.progress_var.set(25)
 
             records = []
             predictions = {}
             top_combinations = {}
 
-            for model_name in selected_models:
+            total_models = len(selected_models)
+            for i, model_name in enumerate(selected_models):
+                self.status_text.set(f"Training {model_name}...")
+                self.root.update_idletasks()
+                
                 pipeline, metrics, pred_df = self._train_single_model(model_name, X_train, X_test, y_train, y_test)
 
                 records.append({
@@ -2190,33 +2460,49 @@ class ModelWorkbenchGUI:
                     axis=1,
                 )
                 top_combinations[model_name] = combo_df[["Combination", "Predicted"] + feature_cols]
+                
+                # update progress
+                prog = 25 + (i + 1) / total_models * 60
+                self.progress_var.set(prog)
 
             self.metrics_df = pd.DataFrame(records).sort_values("R2", ascending=False).reset_index(drop=True)
             self.prediction_frames = predictions
             self.top_combinations = top_combinations
 
-            ratio_model_name = str(self.metrics_df.iloc[0]["Model"])
-            ratio_df = self._run_ratio_analysis(X, y, ratio_model_name, requested_train_sizes)
+            self.status_text.set("Running ratio analysis...")
+            self.root.update_idletasks()
+            ratio_df = self._run_ratio_analysis(X, y, selected_models, requested_train_sizes)
             self.ratio_metrics_df = ratio_df
             self.ratio_best_r2_row = ratio_df.loc[ratio_df["R2"].idxmax()]
             self.ratio_best_rmse_row = ratio_df.loc[ratio_df["RMSE"].idxmin()]
             self.ratio_best_mse_row = ratio_df.loc[ratio_df["MSE"].idxmin()]
             self.ratio_best_mae_row = ratio_df.loc[ratio_df["MAE"].idxmin()]
 
-            self._refresh_model_filters()
+            # update ratio model selector values
+            if hasattr(self, 'ratio_model_combo'):
+                self.ratio_model_combo['values'] = list(ratio_df["Model"].unique())
+                if not self.ratio_model_var.get() or self.ratio_model_var.get() not in self.ratio_model_combo['values']:
+                    self.ratio_model_var.set(str(ratio_df.iloc[0]["Model"]))
 
+            self.progress_var.set(95)
+            self.status_text.set("Updating UI...")
+            self._refresh_model_filters()
             self._update_results_table()
             self._update_ratio_results_table()
             self._update_metric_charts()
             self._update_ratio_chart()
+            
+            self.progress_var.set(100)
+            self.status_text.set("All models trained and results updated.")
+            messagebox.showinfo("Success", "All selected models have been trained successfully.")
             self._update_prediction_chart()
             self._update_combination_chart()
             self._update_output_preview(df)
 
             best_model = self.metrics_df.iloc[0]
             self.status_text.set(
-                f"Run complete. Best model: {best_model['Model']} (r^2={best_model['R2']:.4f}, RMSE={best_model['RMSE']:.4f}, MSE={best_model['MSE']:.4f}, MAE={best_model['MAE']:.4f}) | "
-                f"Best ratio by r^2: {self.ratio_best_r2_row['Ratio']} ({self.ratio_best_r2_row['R2']:.4f}) | "
+                f"Run complete. Best model: {best_model['Model']} (R²={best_model['R2']:.4f}, RMSE={best_model['RMSE']:.4f}, MSE={best_model['MSE']:.4f}, MAE={best_model['MAE']:.4f}) | "
+                f"Best ratio by R²: {self.ratio_best_r2_row['Ratio']} ({self.ratio_best_r2_row['R2']:.4f}) | "
                 f"Best ratio by RMSE: {self.ratio_best_rmse_row['Ratio']} ({self.ratio_best_rmse_row['RMSE']:.4f}) | "
                 f"Best ratio by MSE: {self.ratio_best_mse_row['Ratio']} ({self.ratio_best_mse_row['MSE']:.4f}) | "
                 f"Best ratio by MAE: {self.ratio_best_mae_row['Ratio']} ({self.ratio_best_mae_row['MAE']:.4f})"
@@ -2227,6 +2513,11 @@ class ModelWorkbenchGUI:
 
             if XGBOOST_FALLBACK_MESSAGE:
                 self.status_text.set(f"{self.status_text.get()} | {XGBOOST_FALLBACK_MESSAGE}")
+
+            messagebox.showinfo(
+                "Run Complete",
+                f"All selected models have finished running successfully!\n\nBest Model: {best_model['Model']} (R² = {best_model['R2']:.4f})"
+            )
 
         except Exception as exc:
             messagebox.showerror("Run Failed", str(exc))
@@ -2278,8 +2569,6 @@ class ModelWorkbenchGUI:
 
         _, _, target_col, feature_cols = self._get_features_and_target(source_df)
         best_row = self.metrics_df.iloc[0] if not self.metrics_df.empty else None
-        metrics_preview_df = self.metrics_df.rename(columns={"R2": "r^2"})
-        ratio_preview_df = self.ratio_metrics_df.rename(columns={"R2": "r^2"})
 
         header = [
             f"Run timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -2290,21 +2579,21 @@ class ModelWorkbenchGUI:
             f"Target: {target_col}",
             "",
             (
-                f"Best metrics (highest r^2): {best_row['Model']} | r^2={best_row['R2']:.6f} | RMSE={best_row['RMSE']:.6f} | MSE={best_row['MSE']:.6f} | MAE={best_row['MAE']:.6f}"
+                f"Best metrics (highest R²): {best_row['Model']} | R²={best_row['R2']:.6f} | RMSE={best_row['RMSE']:.6f} | MSE={best_row['MSE']:.6f} | MAE={best_row['MAE']:.6f}"
                 if best_row is not None
-                else "Best metrics (highest r^2): N/A"
+                else "Best metrics (highest R²): N/A"
             ),
             "",
-            "Metrics (sorted by r^2 descending):",
-            metrics_preview_df.to_string(index=False),
+            "Metrics (sorted by R² descending):",
+            self.metrics_df.to_string(index=False),
             "",
             "Ratio analysis (best model across train-test ratios):",
-            ratio_preview_df[["Ratio", "r^2", "RMSE", "MSE", "MAE"]].to_string(index=False) if not ratio_preview_df.empty else "No ratio analysis available",
+            self.ratio_metrics_df[["Ratio", "R2", "RMSE", "MSE", "MAE"]].to_string(index=False) if not self.ratio_metrics_df.empty else "No ratio analysis available",
             "",
             (
-                f"Best ratio by r^2: {self.ratio_best_r2_row['Ratio']} (r^2={self.ratio_best_r2_row['R2']:.6f})"
+                f"Best ratio by R²: {self.ratio_best_r2_row['Ratio']} (R²={self.ratio_best_r2_row['R2']:.6f})"
                 if self.ratio_best_r2_row is not None
-                else "Best ratio by r^2: N/A"
+                else "Best ratio by R²: N/A"
             ),
             (
                 f"Best ratio by RMSE: {self.ratio_best_rmse_row['Ratio']} (RMSE={self.ratio_best_rmse_row['RMSE']:.6f})"

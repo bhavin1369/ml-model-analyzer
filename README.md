@@ -62,6 +62,45 @@ Open http://localhost:5000 in your browser.
 
 ---
 
+## Deploy on Render (Free)
+
+### Step 1 — Push to GitHub
+
+```bash
+cd d:\AI\AI_project
+
+git init
+git add app.py templates/ requirements.txt render.yaml Procfile .gitignore README.md
+git commit -m "ML Model Workbench - web app"
+```
+
+Create a new repository on [github.com/new](https://github.com/new), then:
+
+```bash
+git remote add origin https://github.com/YOUR_USERNAME/ml-model-workbench.git
+git branch -M main
+git push -u origin main
+```
+
+### Step 2 — Deploy on Render
+
+1. Go to [render.com](https://render.com) and **sign up** (free with GitHub)
+2. Click **"New +"** → **"Web Service"**
+3. Click **"Connect a repository"** → select your GitHub repo
+4. Render auto-detects settings from `render.yaml`:
+   - **Name:** `ml-model-workbench`
+   - **Runtime:** Python
+   - **Build Command:** `pip install -r requirements.txt`
+   - **Start Command:** `gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 2`
+5. Select **Free** plan
+6. Click **"Create Web Service"**
+7. Wait 2–3 minutes for the build to finish
+8. Your app is live at: `https://ml-model-workbench.onrender.com`
+
+> **Note:** Free tier spins down after 15 minutes of inactivity. The first request after sleep takes ~30 seconds to wake up.
+
+---
+
 ## How to Use
 
 1. **Upload** — Click the upload area or drag a CSV file (must have headers, last column = target)
@@ -102,3 +141,9 @@ Your CSV file should look like this:
 | Frontend  | HTML, CSS, JavaScript |
 | Hosting   | Render (free tier) |
 | Server    | Gunicorn |
+
+---
+
+## License
+
+MIT License — free to use for academic and personal projects.
