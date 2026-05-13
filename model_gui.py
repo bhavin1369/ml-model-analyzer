@@ -1,3 +1,16 @@
+ML Model Workbench - Professional GUI Version
+-------------------------------------------
+A comprehensive Machine Learning training and analysis tool.
+
+REQUIREMENTS:
+1. Install Python 3.10+
+2. Install dependencies: pip install -r requirements.txt
+
+RUNNING:
+python model_gui.py
+-------------------------------------------
+"""
+
 import math
 import importlib
 import textwrap
