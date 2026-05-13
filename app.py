@@ -128,12 +128,25 @@ def load_dataset(path_str: str) -> pd.DataFrame:
     csv_path = Path(path_str).expanduser()
     if not csv_path.exists():
         raise FileNotFoundError(f"Dataset not found: {csv_path}")
-    df = pd.read_csv(csv_path)
+    
+    try:
+        # auto-detect delimiter (handles comma, semicolon, tab)
+        df = pd.read_csv(csv_path, sep=None, engine='python')
+    except Exception as e:
+        raise ValueError(f"Could not read CSV file: {str(e)}")
+
     if df.shape[1] < 2:
-        raise ValueError("Dataset must have at least one feature column and one target column.")
-    df = df.dropna(axis=0).reset_index(drop=True)
-    if len(df) < 10:
-        raise ValueError("Dataset has too few valid rows after cleaning (need at least 10).")
+        raise ValueError("Dataset must have at least one feature column and one target column. Please check your delimiter (comma, semicolon, or tab).")
+    
+    # Drop completely empty rows/columns
+    df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
+    
+    # Drop rows with any NaN in numeric columns
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    df = df.dropna(subset=numeric_cols).reset_index(drop=True)
+    
+    if len(df) < 5: # Relaxed from 10 to 5
+        raise ValueError(f"Dataset has too few valid numeric rows after cleaning ({len(df)} found).")
     return df
 
 
