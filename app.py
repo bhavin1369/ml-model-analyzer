@@ -220,14 +220,13 @@ def compute_dataset_top10(df: pd.DataFrame, target_col: str | None = None):
     top10 = df.nlargest(10, resolved_target_col).reset_index(drop=True)
     result_rows = []
     for idx, (_, row) in enumerate(top10.iterrows(), start=1):
-        actual_val = float(row[resolved_target_col])
-        entry = {"Rank": f"C{idx}", "Actual": format_feature_value(actual_val)}
+        entry = {"Rank": f"C{idx}", "Actual": float(row[resolved_target_col])}
         for col in feature_cols:
-            value = row[col]
-            if isinstance(value, (np.integer, int, np.floating, float)):
-                entry[col] = format_feature_value(float(value))
+            val = row[col]
+            if isinstance(val, (int, float, np.integer, np.floating)):
+                entry[col] = float(val)
             else:
-                entry[col] = str(value)
+                entry[col] = str(val)
         result_rows.append(entry)
     return result_rows, resolved_target_col, feature_cols
 
@@ -681,6 +680,17 @@ def upload_dataset():
         df = load_dataset(str(filepath))
         target_col = str(df.columns[-1])
         dataset_top10_rows, _, feature_cols = compute_dataset_top10(df, target_col)
+        # Pre-format top 10 for the UI table only
+        formatted_top10 = []
+        for row in dataset_top10_rows:
+            f_row = {}
+            for k, v in row.items():
+                if k == "Rank":
+                    f_row[k] = v
+                else:
+                    f_row[k] = format_feature_value(v)
+            formatted_top10.append(f_row)
+
         info = {
             "filename": filename,
             "rows": len(df),
@@ -689,7 +699,7 @@ def upload_dataset():
             "features": feature_cols,
             "target": target_col,
             "filepath": str(filepath),
-            "dataset_top10": dataset_top10_rows,
+            "dataset_top10": formatted_top10,
             "dataset_top10_chart": build_dataset_top10_chart(dataset_top10_rows, target_col),
         }
         return jsonify(info)
