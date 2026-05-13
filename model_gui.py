@@ -1,3 +1,4 @@
+"""
 ML Model Workbench - Professional GUI Version
 -------------------------------------------
 A comprehensive Machine Learning training and analysis tool.
