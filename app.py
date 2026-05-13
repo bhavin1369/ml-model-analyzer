@@ -365,8 +365,8 @@ def build_comparison_chart(metrics_df):
     fig = make_subplots(
         rows=1, cols=2,
         subplot_titles=[
-            f"<b>R² Accuracy Comparison</b><br><sup>Best: {best_model['Model']} ({best_model['R2']*100:.2f}%)</sup>",
-            f"<b>RMSE Error Comparison</b><br><sup>Best: {best_model['Model']} ({best_model['RMSE']:.6f})</sup>",
+            f"<b>(a) R² Accuracy Comparison</b><br><sup>Best: {best_model['Model']} ({best_model['R2']*100:.2f}%)</sup>",
+            f"<b>(b) RMSE Error Comparison</b><br><sup>Best: {best_model['Model']} ({best_model['RMSE']:.6f})</sup>",
         ],
         horizontal_spacing=0.18,
     )
@@ -403,6 +403,7 @@ def build_comparison_chart(metrics_df):
         )
         fig.update_yaxes(
             showgrid=False, tickfont=dict(size=11),
+            title_text="ML Models", title_font=dict(size=12),
             row=1, col=col_idx,
         )
     fig.update_xaxes(title_text="R² Score (%)", title_font=dict(size=12), row=1, col=1)
@@ -411,7 +412,7 @@ def build_comparison_chart(metrics_df):
     return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
 
 
-def build_prediction_chart_single(name, frame, metric_row, color_idx=0):
+def build_prediction_chart_single(name, frame, metric_row, color_idx=0, resolved_target_col="Target"):
     """Build a single predicted-vs-actual chart for one model — research paper quality."""
     actual = np.clip(frame["Actual"].values, PREDICTION_PLOT_MIN, PREDICTION_PLOT_MAX)
     predicted = np.clip(frame["Predicted"].values, PREDICTION_PLOT_MIN, PREDICTION_PLOT_MAX)
@@ -429,7 +430,7 @@ def build_prediction_chart_single(name, frame, metric_row, color_idx=0):
             line=dict(width=0.3, color='#555'), opacity=0.85,
         ),
         name='Data points',
-        hovertemplate='Actual: %{x:.4f}<br>Predicted: %{y:.4f}<extra></extra>',
+        hovertemplate=f'Actual {resolved_target_col}: %{{x:.4f}}<br>Predicted {resolved_target_col}: %{{y:.4f}}<extra></extra>',
     ))
     fig.add_trace(go.Scatter(
         x=[lo, hi], y=[lo, hi], mode='lines',
@@ -441,15 +442,15 @@ def build_prediction_chart_single(name, frame, metric_row, color_idx=0):
     rmse = metric_row['RMSE']
     fig.update_layout(
         title=dict(
-            text=f"<b>{name}</b><br><sup>R² = {r2:.4f} | RMSE = {rmse:.6f}</sup>",
+            text=f"<b>({chr(97 + color_idx)}) {name}</b><br><sup>R² = {r2:.4f} | RMSE = {rmse:.6f}</sup>",
             font=dict(size=14),
         ),
         xaxis=dict(
-            title="Actual Values", range=[lo, hi],
+            title=f"Actual {resolved_target_col}", range=[lo, hi],
             showgrid=True, gridcolor='#e8e8e8', zeroline=False,
         ),
         yaxis=dict(
-            title="Predicted Values", range=[lo, hi],
+            title=f"Predicted {resolved_target_col}", range=[lo, hi],
             showgrid=True, gridcolor='#e8e8e8', zeroline=False,
             scaleanchor="x", scaleratio=1,
         ),
@@ -489,7 +490,7 @@ def build_dataset_top10_chart(dataset_top10_rows, target_col):
     ymax = max(values) if values else 1
     ypad = (ymax - ymin) * 0.12 if ymax != ymin else 0.02
     fig.update_layout(
-        title=dict(text=f"<b>Dataset Top 10 - Best {target_col} Values</b>", font=dict(size=14)),
+        title=dict(text=f"<b>(a) Dataset Top 10 - Best {target_col} Values</b>", font=dict(size=14)),
         xaxis=dict(title="Combination Rank", showgrid=False),
         yaxis=dict(title=f"Actual {target_col}", showgrid=True, gridcolor="#e8e8e8", range=[ymin - ypad, ymax + ypad]),
         height=460,
@@ -516,7 +517,7 @@ def build_ratio_chart(ratio_df: pd.DataFrame):
         marker=dict(size=8),
         text=[f"{v:.4f}" for v in ratio_df["R2"]],
         textposition="top center",
-        hovertemplate="Ratio: %{x}<br>R2: %{y:.6f}<extra></extra>",
+        hovertemplate="Ratio: %{x}<br>R2 Accuracy: %{y:.6f}<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
         x=ratio_df["Ratio"],
@@ -527,12 +528,12 @@ def build_ratio_chart(ratio_df: pd.DataFrame):
         marker=dict(size=8),
         text=[f"{v:.4f}" for v in ratio_df["RMSE"]],
         textposition="bottom center",
-        hovertemplate="Ratio: %{x}<br>RMSE: %{y:.6f}<extra></extra>",
+        hovertemplate="Ratio: %{x}<br>RMSE Error: %{y:.6f}<extra></extra>",
         yaxis="y2",
     ))
 
     fig.update_layout(
-        title=dict(text="<b>Model Performance vs Train-Test Ratio</b>", font=dict(size=14)),
+        title=dict(text="<b>(a) Model Performance vs Train-Test Ratio</b>", font=dict(size=14)),
         xaxis=dict(title="Train-Test Ratio", showgrid=True, gridcolor="#e8e8e8"),
         yaxis=dict(title="R2", side="left", showgrid=True, gridcolor="#e8e8e8"),
         yaxis2=dict(title="RMSE", overlaying="y", side="right", showgrid=False),
@@ -557,12 +558,12 @@ def build_prediction_charts(metrics_df, predictions):
             continue
         frame = predictions[name]
         metric_row = metrics_df[metrics_df["Model"] == name].iloc[0]
-        fig = build_prediction_chart_single(name, frame, metric_row, idx)
+        fig = build_prediction_chart_single(name, frame, metric_row, idx, resolved_target_col)
         result[name] = json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
     return result
 
 
-def build_combination_chart_single(name, top_df, feature_cols):
+def build_combination_chart_single(name, top_df, feature_cols, target_col, color_idx=0):
     """Build a single top-10 combinations chart for one model — research paper quality with viridis bars."""
     top_df = top_df.sort_values("Predicted", ascending=False).reset_index(drop=True)
     labels = [f"C{i+1}" for i in range(len(top_df))]
@@ -589,7 +590,7 @@ def build_combination_chart_single(name, top_df, feature_cols):
     ypad = (ymax - ymin) * 0.12 if ymax != ymin else 0.02
     fig.update_layout(
         title=dict(
-            text=f"<b>{name} — Top 10 Best Combinations</b>",
+            text=f"<b>({chr(97 + color_idx)}) {name} — Top 10 Best Combinations</b>",
             font=dict(size=14),
         ),
         xaxis=dict(
@@ -597,7 +598,7 @@ def build_combination_chart_single(name, top_df, feature_cols):
             showgrid=False,
         ),
         yaxis=dict(
-            title="Predicted Target Value",
+            title=f"Predicted {target_col}",
             showgrid=True, gridcolor='#e8e8e8',
             range=[ymin - ypad, ymax + ypad],
         ),
@@ -610,16 +611,17 @@ def build_combination_chart_single(name, top_df, feature_cols):
     return fig
 
 
-def build_combination_charts(metrics_df, top_combinations, feature_cols):
+def build_combination_charts(metrics_df, top_combinations, feature_cols, target_col):
     """Build per-model top-10 combination charts — returns dict of model_name -> plotly JSON."""
-    if not top_combinations:
+    if metrics_df.empty:
         return {}
 
     result = {}
-    for name in metrics_df["Model"].tolist():
+    for idx, name in enumerate(metrics_df["Model"].tolist()):
         if name not in top_combinations:
             continue
-        fig = build_combination_chart_single(name, top_combinations[name], feature_cols)
+        top_df = top_combinations[name]
+        fig = build_combination_chart_single(name, top_df, feature_cols, target_col, idx)
         result[name] = json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
     return result
 
@@ -730,7 +732,7 @@ def train():
         # Build charts
         comparison_chart = build_comparison_chart(metrics_df)
         prediction_chart = build_prediction_charts(metrics_df, predictions)
-        combination_chart = build_combination_charts(metrics_df, top_combinations, feature_cols)
+        combination_chart = build_combination_charts(metrics_df, top_combinations, feature_cols, resolved_target_col)
         dataset_top10_chart = build_dataset_top10_chart(dataset_top10_rows, resolved_target_col)
         ratio_chart = build_ratio_chart(ratio_df)
 
