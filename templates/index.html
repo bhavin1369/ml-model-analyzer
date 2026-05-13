@@ -1095,7 +1095,7 @@
             cols.forEach((c) => {
               const v = row[c];
               cd +=
-                "<td>" + (typeof v === "number" ? v.toFixed(4) : v) + "</td>";
+                "<td>" + v + "</td>";
             });
             cd += "</tr>";
           });
@@ -1132,9 +1132,7 @@
           cols.forEach((c) => {
             const v = row[c];
             html +=
-              "<td>" +
-              (typeof v === "number" ? Number(v).toFixed(4) : v) +
-              "</td>";
+              "<td>" + v + "</td>";
           });
           html += "</tr>";
         });

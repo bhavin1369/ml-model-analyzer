@@ -207,13 +207,12 @@ def compute_dataset_top10(df: pd.DataFrame, target_col: str | None = None):
     top10 = df.nlargest(10, resolved_target_col).reset_index(drop=True)
     result_rows = []
     for idx, (_, row) in enumerate(top10.iterrows(), start=1):
-        entry = {"Rank": f"C{idx}", "Actual": float(row[resolved_target_col])}
+        actual_val = float(row[resolved_target_col])
+        entry = {"Rank": f"C{idx}", "Actual": format_feature_value(actual_val)}
         for col in feature_cols:
             value = row[col]
-            if isinstance(value, (np.integer, int)):
-                entry[col] = int(value)
-            elif isinstance(value, (np.floating, float)):
-                entry[col] = float(value)
+            if isinstance(value, (np.integer, int, np.floating, float)):
+                entry[col] = format_feature_value(float(value))
             else:
                 entry[col] = str(value)
         result_rows.append(entry)
@@ -746,7 +745,18 @@ def train():
         # Build top combinations detail
         combo_details = {}
         for model_name, combo_df in top_combinations.items():
-            combo_details[model_name] = combo_df.round(4).to_dict(orient="records")
+            # Convert to list of dicts with pre-formatted values
+            formatted_rows = []
+            for _, row in combo_df.iterrows():
+                f_row = {}
+                for col in combo_df.columns:
+                    val = row[col]
+                    if isinstance(val, (int, float, np.integer, np.floating)):
+                        f_row[col] = format_feature_value(float(val))
+                    else:
+                        f_row[col] = str(val)
+                formatted_rows.append(f_row)
+            combo_details[model_name] = formatted_rows
 
         # Best model summary
         best = metrics_df.iloc[0]
