@@ -553,13 +553,15 @@ def build_prediction_charts(metrics_df, predictions, resolved_target_col):
         return {}
 
     result = {}
-    for idx, name in enumerate(metrics_df["Model"].tolist()):
+    plot_idx = 0
+    for name in metrics_df["Model"].tolist():
         if name not in predictions:
             continue
         frame = predictions[name]
         metric_row = metrics_df[metrics_df["Model"] == name].iloc[0]
-        fig = build_prediction_chart_single(name, frame, metric_row, idx, resolved_target_col)
+        fig = build_prediction_chart_single(name, frame, metric_row, plot_idx, resolved_target_col)
         result[name] = json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
+        plot_idx += 1
     return result
 
 
@@ -617,12 +619,14 @@ def build_combination_charts(metrics_df, top_combinations, feature_cols, target_
         return {}
 
     result = {}
-    for idx, name in enumerate(metrics_df["Model"].tolist()):
+    plot_idx = 0
+    for name in metrics_df["Model"].tolist():
         if name not in top_combinations:
             continue
         top_df = top_combinations[name]
-        fig = build_combination_chart_single(name, top_df, feature_cols, target_col, idx)
+        fig = build_combination_chart_single(name, top_df, feature_cols, target_col, plot_idx)
         result[name] = json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
+        plot_idx += 1
     return result
 
 
