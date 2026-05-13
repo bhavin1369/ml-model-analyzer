@@ -547,7 +547,7 @@ def build_ratio_chart(ratio_df: pd.DataFrame):
     return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
 
 
-def build_prediction_charts(metrics_df, predictions):
+def build_prediction_charts(metrics_df, predictions, resolved_target_col):
     """Build per-model predicted vs actual charts — returns dict of model_name -> plotly JSON."""
     if metrics_df.empty:
         return {}
@@ -731,7 +731,7 @@ def train():
 
         # Build charts
         comparison_chart = build_comparison_chart(metrics_df)
-        prediction_chart = build_prediction_charts(metrics_df, predictions)
+        prediction_chart = build_prediction_charts(metrics_df, predictions, resolved_target_col)
         combination_chart = build_combination_charts(metrics_df, top_combinations, feature_cols, resolved_target_col)
         dataset_top10_chart = build_dataset_top10_chart(dataset_top10_rows, resolved_target_col)
         ratio_chart = build_ratio_chart(ratio_df)
