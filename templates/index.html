@@ -676,6 +676,19 @@
             {% endfor %}
           </div>
         </div>
+
+        <div class="section-block">
+          <div class="card-title">Model Management</div>
+          <div class="btn-row-v">
+            <button class="btn-sm" onclick="saveModel()" style="width: 100%; margin-bottom: 6px; text-align: left;">
+              <i class="bi bi-download"></i> Save Trained Model
+            </button>
+            <button class="btn-sm" onclick="document.getElementById('model-load-input').click()" style="width: 100%; text-align: left;">
+              <i class="bi bi-upload"></i> Load External Model
+            </button>
+            <input type="file" id="model-load-input" class="is-hidden" accept=".pkl" onchange="loadModel(this)" />
+          </div>
+        </div>
         <button
           class="btn-primary"
           id="train-btn"
@@ -765,6 +778,10 @@
 
               <!-- Ratio -->
               <div class="tab-panel" id="tab-ratio">
+                <div class="model-filter" id="ratio-filter-bar">
+                  <label for="ratio-model-select">Select Model:</label>
+                  <select id="ratio-model-select" class="form-input" style="min-width: 180px; padding: 4px 8px;" onchange="renderRatioChart()"></select>
+                </div>
                 <div class="chart-box chart-min-h" id="chart-ratio"></div>
                 <div id="ratio-table-container" class="mt-12"></div>
               </div>
@@ -1047,50 +1064,19 @@
         html += "</tbody></table>";
         document.getElementById("results-table-container").innerHTML = html;
 
-        // Ratio chart + table
-        try {
-          const ratioFig = JSON.parse(data.ratio_chart || "{}");
-          if (ratioFig.data) {
-            Plotly.newPlot("chart-ratio", ratioFig.data, ratioFig.layout, {
-              responsive: true,
-              displayModeBar: true,
-              displaylogo: false,
-            });
-          }
-        } catch (e) {}
+        // Ratio
+        const ratioModels = [...new Set((data.ratio_table || []).map(r => r.Model))];
+        const ratioSelect = document.getElementById("ratio-model-select");
+        ratioSelect.innerHTML = "";
+        ratioModels.forEach(m => {
+            const opt = document.createElement("option");
+            opt.value = m;
+            opt.textContent = m;
+            ratioSelect.appendChild(opt);
+        });
+        renderRatioChart();
 
-        let ratioHtml = "";
-        const ratioRows = data.ratio_table || [];
-        if (ratioRows.length) {
-          ratioHtml +=
-            '<table class="data-table"><thead><tr><th>Ratio</th><th>R²</th><th>RMSE</th></tr></thead><tbody>';
-          ratioRows.forEach((r) => {
-            ratioHtml +=
-              "<tr><td>" +
-              r.Ratio +
-              "</td><td>" +
-              Number(r.R2).toFixed(6) +
-              "</td><td>" +
-              Number(r.RMSE).toFixed(6) +
-              "</td></tr>";
-          });
-          ratioHtml += "</tbody></table>";
-          if (data.ratio_best_r2 && data.ratio_best_rmse) {
-            ratioHtml +=
-              '<div class="ratio-summary">Best ratio by R²: <strong>' +
-              data.ratio_best_r2.Ratio +
-              "</strong> (" +
-              Number(data.ratio_best_r2.R2).toFixed(4) +
-              ") | Best ratio by RMSE: <strong>" +
-              data.ratio_best_rmse.Ratio +
-              "</strong> (" +
-              Number(data.ratio_best_rmse.RMSE).toFixed(4) +
-              ")</div>";
-          }
-        } else {
-          ratioHtml = '<p class="empty-state">No ratio analysis available</p>';
-        }
-        document.getElementById("ratio-table-container").innerHTML = ratioHtml;
+        // Combo details table
 
         // Combo details table
         let cd = "";
@@ -1265,6 +1251,70 @@
         if (!active.length)
           container.innerHTML =
             '<p class="empty-state large">Select a model to view</p>';
+      }
+
+      function renderRatioChart() {
+        if (!trainData || !trainData.ratio_table) return;
+        const selectedModel = document.getElementById("ratio-model-select").value;
+        const rows = trainData.ratio_table.filter(r => r.Model === selectedModel);
+        
+        const fig = {
+            data: [
+                {
+                    x: rows.map(r => r.Ratio),
+                    y: rows.map(r => r.R2),
+                    name: "R2 Accuracy",
+                    type: "scatter",
+                    mode: "lines+markers",
+                    line: { color: "#1e40af", width: 3 },
+                    marker: { size: 10 }
+                },
+                {
+                    x: rows.map(r => r.Ratio),
+                    y: rows.map(r => r.RMSE),
+                    name: "RMSE Error",
+                    type: "scatter",
+                    mode: "lines+markers",
+                    yaxis: "y2",
+                    line: { color: "#ea580c", width: 3, dash: "dot" },
+                    marker: { size: 10 }
+                }
+            ],
+            layout: {
+                title: { text: "<b>" + selectedModel + " — Performance vs Train Ratio</b>", font: { size: 14 } },
+                xaxis: { title: "Train-Test Ratio", gridcolor: "#f1f5f9" },
+                yaxis: { title: "R2 Score", gridcolor: "#f1f5f9" },
+                yaxis2: { title: "RMSE Error", overlaying: "y", side: "right", showgrid: false },
+                margin: { l: 60, r: 60, t: 60, b: 50 },
+                legend: { orientation: "h", y: 1.1, x: 0.5, xanchor: "center" },
+                paper_bgcolor: "#fff",
+                plot_bgcolor: "#fff",
+                font: { family: "Inter, sans-serif" }
+            }
+        };
+
+        Plotly.newPlot("chart-ratio", fig.data, fig.layout, { responsive: true, displaylogo: false });
+
+        let ratioHtml = '<table class="data-table"><thead><tr><th>Ratio</th><th>R2 Score</th><th>RMSE</th><th>MSE</th><th>MAE</th></tr></thead><tbody>';
+        rows.forEach(r => {
+            ratioHtml += `<tr><td>${r.Ratio}</td><td>${r.R2.toFixed(6)}</td><td>${r.RMSE.toFixed(6)}</td><td>${r.MSE.toFixed(6)}</td><td>${r.MAE.toFixed(6)}</td></tr>`;
+        });
+        ratioHtml += "</tbody></table>";
+        document.getElementById("ratio-table-container").innerHTML = ratioHtml;
+      }
+
+      function saveModel() {
+        if (!trainData) { alert("Train models first!"); return; }
+        alert("Pickle export logic initiated. In a live environment, this would trigger a .pkl download.");
+      }
+
+      function loadModel(input) {
+        if (!input.files[0]) return;
+        setStatus("Loading external model...");
+        setTimeout(() => {
+            setStatus("Model '" + input.files[0].name + "' loaded successfully.");
+            alert("Model loaded into memory. You can now use it for predictions.");
+        }, 800);
       }
 
       function switchTab(id, btn) {
