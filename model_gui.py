@@ -1021,6 +1021,9 @@ class ModelWorkbenchGUI:
         self._enable_canvas_interactions(self.ratio_canvas)
         self._add_canvas_toolbar(ratio_toolbar_holder, self.ratio_canvas)
 
+        self.output_text = tk.Text(output_tab, wrap="none", relief="solid", borderwidth=1, font=("Segoe UI", 9), bg="#ffffff")
+        self.output_text.pack(fill="both", expand=True, padx=8, pady=8)
+
         status_container = ttk.Frame(self.root, padding=(12, 4))
         status_container.pack(fill="x", side="bottom")
 
