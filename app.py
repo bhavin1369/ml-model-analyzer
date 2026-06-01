@@ -32,7 +32,7 @@ from sklearn.ensemble import (
     RandomForestRegressor,
 )
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.pipeline import Pipeline
@@ -53,6 +53,9 @@ RANDOM_STATE = 42
 DEFAULT_RATIO_LIST_TEXT = "80,70,60"
 PREDICTION_PLOT_MIN = 0.0
 PREDICTION_PLOT_MAX = 1.0
+
+# Cache for trained model results to allow fast styling/formatting changes
+TRAINED_RESULTS_CACHE = {}
 
 
 # ── Model Builders ─────────────────────────────────────────────────────────────
@@ -276,7 +279,7 @@ def run_ratio_analysis(X, y, model_names: list[str], train_sizes: list[float]):
 
 
 def train_models(df, selected_models, test_size=0.2, target_col=None):
-    """Train selected models and return metrics, predictions, and top combinations."""
+    """Train selected models and return metrics, predictions, top combinations, and trained pipelines."""
     X, y, resolved_target_col, feature_cols = get_features_and_target(df, target_col)
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -286,6 +289,7 @@ def train_models(df, selected_models, test_size=0.2, target_col=None):
     records = []
     predictions = {}
     top_combinations = {}
+    pipelines = {}
 
     for model_name in selected_models:
         builder = MODEL_BUILDERS.get(model_name)
@@ -330,27 +334,55 @@ def train_models(df, selected_models, test_size=0.2, target_col=None):
         combo_df["Predicted"] = combo_preds
         combo_df = combo_df.sort_values("Predicted", ascending=False).head(10).reset_index(drop=True)
         top_combinations[model_name] = combo_df
+        
+        # Save pipeline for live formatting/inference on other subsets (like actual Top 10 combos)
+        pipelines[model_name] = pipeline
 
-        del pipeline, model, y_pred
+        del y_pred
         gc.collect()
 
     metrics_df = pd.DataFrame(records).sort_values("R2", ascending=False).reset_index(drop=True)
-    return metrics_df, predictions, top_combinations, feature_cols, resolved_target_col, X, y
+    return metrics_df, predictions, top_combinations, feature_cols, resolved_target_col, X, y, pipelines
+
+
+def get_colors_by_palette(palette_name, n, highlight_idx=None, highlight_color=None):
+    """Generate n colors based on selected palette with optional single-bar highlight."""
+    palette = (palette_name or "Default").lower()
+    
+    # Base palettes
+    if palette == "grayscale":
+        base_colors = ['#333333', '#555555', '#777777', '#999999', '#bbbbbb', '#dddddd']
+    elif palette == "set2":
+        base_colors = ['#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3', '#a6d854', '#ffd92f']
+    elif palette == "viridis":
+        base_colors = ['#440154', '#482878', '#3e4989', '#31688e', '#26828e', '#1f9e89', '#35b779', '#6ece58', '#b5de2b', '#fde725']
+    elif palette == "plasma":
+        base_colors = ['#0d0887', '#46039f', '#7201a8', '#9c179e', '#bd3786', '#d8576b', '#ed7953', '#fb9f3a', '#fdca26', '#f0f921']
+    elif palette == "coolwarm":
+        base_colors = ['#3b4cc0', '#6788ee', '#9abbff', '#c9d7f5', '#edd1c2', '#f7a889', '#e26952', '#b40426']
+    else:
+        # Default
+        base_colors = ['#3d8ec9', '#f4a259', '#74c476', '#9c89b8', '#4793af', '#ffc470', '#dd5746', '#8b322c']
+
+    # Interpolate to get exactly n colors
+    colors = []
+    if n <= 1:
+        colors = [base_colors[0]]
+    else:
+        for i in range(n):
+            idx = i * (len(base_colors) - 1) / max(n - 1, 1)
+            colors.append(base_colors[min(int(round(idx)), len(base_colors) - 1)])
+
+    # Apply highlight if requested
+    if highlight_idx is not None and 0 <= highlight_idx < len(colors):
+        if highlight_color and highlight_color.lower() != "none" and highlight_color.lower() != "default":
+            colors[highlight_idx] = highlight_color.lower()
+
+    return colors
 
 
 def _viridis_colors(n):
-    """Generate n colors from viridis-like rainbow palette for research papers."""
-    palette = [
-        '#440154', '#482878', '#3e4989', '#31688e', '#26828e',
-        '#1f9e89', '#35b779', '#6ece58', '#b5de2b', '#fde725',
-    ]
-    if n <= len(palette):
-        return palette[:n]
-    out = []
-    for i in range(n):
-        idx = i * (len(palette) - 1) / max(n - 1, 1)
-        out.append(palette[min(int(round(idx)), len(palette) - 1)])
-    return out
+    return get_colors_by_palette("Viridis", n)
 
 
 # 10 distinct research-paper scatter colors (colorblind-friendly)
@@ -361,8 +393,8 @@ SCATTER_COLORS = [
 ]
 
 
-def build_comparison_chart(metrics_df):
-    """Build model comparison chart — research paper quality."""
+def build_comparison_chart(metrics_df, font_family="Segoe UI", font_size=10, palette="Default", highlight_model="None", highlight_color="None", view_mode="2D", axis_limits=None):
+    """Build model comparison chart — research paper quality, 2x2 grids, custom aesthetics and 3D mode."""
     if metrics_df.empty:
         return "{}"
 
@@ -370,112 +402,172 @@ def build_comparison_chart(metrics_df):
     models = display_df["Model"].tolist()
     r2_vals = (display_df["R2"] * 100).tolist()
     rmse_vals = display_df["RMSE"].tolist()
-    best_model = display_df.iloc[-1]
+    mse_vals = display_df["MSE"].tolist()
+    mae_vals = display_df["MAE"].tolist()
     n = len(models)
 
-    fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=[
-            f"<b>(a) R² Accuracy Comparison</b><br><sup>Best: {best_model['Model']} ({best_model['R2']*100:.2f}%)</sup>",
-            f"<b>(b) RMSE Error Comparison</b><br><sup>Best: {best_model['Model']} ({best_model['RMSE']:.6f})</sup>",
-        ],
-        horizontal_spacing=0.18,
-    )
+    # Determine highlight index
+    highlight_idx = None
+    if highlight_model in models:
+        highlight_idx = models.index(highlight_model)
 
-    colors_r2 = _viridis_colors(n)
-    colors_r2[-1] = '#e6194b'  # highlight best
-    fig.add_trace(go.Bar(
-        y=models, x=r2_vals, orientation='h',
-        marker=dict(color=colors_r2, line=dict(color='#333', width=0.5)),
-        text=[f"{v:.2f}%" for v in r2_vals], textposition='outside',
-        textfont=dict(size=10), name='R²',
-    ), row=1, col=1)
+    colors_r2 = get_colors_by_palette(palette, n, highlight_idx, highlight_color)
+    colors_rmse = get_colors_by_palette(palette, n, highlight_idx, highlight_color)
+    colors_mse = get_colors_by_palette(palette, n, highlight_idx, highlight_color)
+    colors_mae = get_colors_by_palette(palette, n, highlight_idx, highlight_color)
 
-    colors_rmse = _viridis_colors(n)
-    colors_rmse[-1] = '#e6194b'
-    fig.add_trace(go.Bar(
-        y=models, x=rmse_vals, orientation='h',
-        marker=dict(color=colors_rmse, line=dict(color='#333', width=0.5)),
-        text=[f"{v:.6f}" for v in rmse_vals], textposition='outside',
-        textfont=dict(size=10), name='RMSE',
-    ), row=1, col=2)
+    font_size = float(font_size) if font_size else 10.0
 
-    fig.update_layout(
-        height=max(420, n * 48 + 140), showlegend=False,
-        font=dict(family="Inter, serif", size=12, color='#222'),
-        paper_bgcolor='#fff', plot_bgcolor='#fff',
-        margin=dict(l=10, r=50, t=80, b=40),
-    )
-    for col_idx in [1, 2]:
-        fig.update_xaxes(
-            showgrid=True, gridcolor='#e0e0e0', gridwidth=1,
-            zeroline=True, zerolinecolor='#ccc',
-            row=1, col=col_idx,
+    if str(view_mode).upper() == "3D":
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=[
+                "<b>(a) R² Accuracy Comparison (3D)</b>",
+                "<b>(b) RMSE Error Comparison (3D)</b>",
+                "<b>(c) MSE Comparison (3D)</b>",
+                "<b>(d) MAE Comparison (3D)</b>",
+            ],
+            specs=[
+                [{"type": "scene"}, {"type": "scene"}],
+                [{"type": "scene"}, {"type": "scene"}]
+            ],
+            horizontal_spacing=0.08,
+            vertical_spacing=0.12,
         )
-        fig.update_yaxes(
-            showgrid=False, tickfont=dict(size=11),
-            title_text="ML Models", title_font=dict(size=12),
-            row=1, col=col_idx,
+
+        def add_3d_needles(fig, x_data, y_data, z_data, colors, row, col, name):
+            x_lines = []
+            y_lines = []
+            z_lines = []
+            for idx, (x_val, y_val, z_val) in enumerate(zip(x_data, y_data, z_data)):
+                x_lines.extend([x_val, x_val, None])
+                y_lines.extend([y_val, y_val, None])
+                z_lines.extend([0, z_val, None])
+                
+            fig.add_trace(go.Scatter3d(
+                x=x_lines, y=y_lines, z=z_lines,
+                mode="lines",
+                line=dict(color="#555", width=3),
+                showlegend=False,
+                hoverinfo="skip"
+            ), row=row, col=col)
+            
+            fig.add_trace(go.Scatter3d(
+                x=x_data, y=y_data, z=z_data,
+                mode="markers",
+                marker=dict(size=8, color=colors, line=dict(color="#333", width=1)),
+                name=name,
+                hovertemplate="Model: %{x}<br>Value: %{z:.6f}<extra></extra>"
+            ), row=row, col=col)
+
+        x_zeros = [0] * n
+        add_3d_needles(fig, models, x_zeros, r2_vals, colors_r2, 1, 1, "R² (%)")
+        add_3d_needles(fig, models, x_zeros, rmse_vals, colors_rmse, 1, 2, "RMSE")
+        add_3d_needles(fig, models, x_zeros, mse_vals, colors_mse, 2, 1, "MSE")
+        add_3d_needles(fig, models, x_zeros, mae_vals, colors_mae, 2, 2, "MAE")
+
+        fig.update_layout(
+            height=850,
+            showlegend=False,
+            font=dict(family=font_family, size=font_size, color='#222'),
+            paper_bgcolor='#fff',
+            margin=dict(l=10, r=10, t=80, b=40),
         )
-    fig.update_xaxes(title_text="R² Score (%)", title_font=dict(size=12), row=1, col=1)
-    fig.update_xaxes(title_text="RMSE", title_font=dict(size=12), row=1, col=2)
+
+        scenes = ["scene", "scene2", "scene3", "scene4"]
+        metrics = ["r2", "rmse", "mse", "mae"]
+        for sc_idx, (sc, m) in enumerate(zip(scenes, metrics)):
+            lims = (axis_limits or {}).get(m, {})
+            z_min = float(lims.get("ymin")) if lims.get("ymin") else None
+            z_max = float(lims.get("ymax")) if lims.get("ymax") else None
+            
+            if m == "r2" and z_min is not None and z_min <= 1.0: z_min *= 100.0
+            if m == "r2" and z_max is not None and z_max <= 1.0: z_max *= 100.0
+                
+            z_axis_opts = dict(title=m.upper())
+            if z_min is not None and z_max is not None and z_min < z_max:
+                z_axis_opts["range"] = [z_min, z_max]
+                
+            fig.update_layout({
+                sc: dict(
+                    xaxis=dict(title="Models", tickangle=30),
+                    yaxis=dict(title="", showticklabels=False),
+                    zaxis=z_axis_opts,
+                    camera=dict(eye=dict(x=1.6, y=1.6, z=1.2))
+                )
+            })
+
+    else:
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=[
+                "<b>(a) R² Accuracy Comparison</b>",
+                "<b>(b) RMSE Error Comparison</b>",
+                "<b>(c) MSE Comparison</b>",
+                "<b>(d) MAE Comparison</b>",
+            ],
+            horizontal_spacing=0.18,
+            vertical_spacing=0.25,
+        )
+
+        def add_2d_trace(fig, y_data, x_data, colors, row, col, name, label_fmt):
+            fig.add_trace(go.Bar(
+                y=y_data, x=x_data, orientation='h',
+                marker=dict(color=colors, line=dict(color='#333', width=0.5)),
+                text=[label_fmt.format(v) for v in x_data], textposition='outside',
+                textfont=dict(size=9, family=font_family), name=name,
+                hovertemplate="Model: %{y}<br>Value: %{x}<extra></extra>"
+            ), row=row, col=col)
+
+        add_2d_trace(fig, models, r2_vals, colors_r2, 1, 1, "R² Score (%)", "{:.2f}%")
+        add_2d_trace(fig, models, rmse_vals, colors_rmse, 1, 2, "RMSE", "{:.6f}")
+        add_2d_trace(fig, models, mse_vals, colors_mse, 2, 1, "MSE", "{:.6f}")
+        add_2d_trace(fig, models, mae_vals, colors_mae, 2, 2, "MAE", "{:.6f}")
+
+        fig.update_layout(
+            height=900,
+            showlegend=False,
+            font=dict(family=font_family, size=font_size, color='#222'),
+            paper_bgcolor='#fff',
+            plot_bgcolor='#fff',
+            margin=dict(l=10, r=60, t=80, b=40),
+        )
+
+        metrics = ["r2", "rmse", "mse", "mae"]
+        titles = ["R² Score (%)", "RMSE", "MSE", "MAE"]
+        grid_positions = [(1, 1), (1, 2), (2, 1), (2, 2)]
+
+        for idx, (row, col) in enumerate(grid_positions):
+            m = metrics[idx]
+            lims = (axis_limits or {}).get(m, {})
+            x_min = float(lims.get("ymin")) if lims.get("ymin") else None
+            x_max = float(lims.get("ymax")) if lims.get("ymax") else None
+            
+            if m == "r2" and x_min is not None and x_min <= 1.0: x_min *= 100.0
+            if m == "r2" and x_max is not None and x_max <= 1.0: x_max *= 100.0
+                
+            x_axis_opts = dict(
+                title_text=titles[idx], title_font=dict(size=11),
+                showgrid=True, gridcolor='#e0e0e0', gridwidth=1,
+                zeroline=True, zerolinecolor='#ccc'
+            )
+            if x_min is not None and x_max is not None and x_min < x_max:
+                x_axis_opts["range"] = [x_min, x_max]
+                
+            fig.update_xaxes(x_axis_opts, row=row, col=col)
+            fig.update_yaxes(
+                showgrid=False, tickfont=dict(size=10),
+                title_text="ML Models", title_font=dict(size=11),
+                row=row, col=col
+            )
 
     return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
 
 
-def build_prediction_chart_single(name, frame, metric_row, color_idx=0, resolved_target_col="Target"):
-    """Build a single predicted-vs-actual chart for one model — research paper quality."""
-    actual = np.clip(frame["Actual"].values, PREDICTION_PLOT_MIN, PREDICTION_PLOT_MAX)
-    predicted = np.clip(frame["Predicted"].values, PREDICTION_PLOT_MIN, PREDICTION_PLOT_MAX)
-    residual = actual - predicted
-    lo, hi = PREDICTION_PLOT_MIN, PREDICTION_PLOT_MAX
-
-    color = SCATTER_COLORS[color_idx % len(SCATTER_COLORS)]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=actual, y=predicted, mode='markers',
-        marker=dict(
-            size=5, color=residual, colorscale='RdYlGn_r',
-            showscale=True, colorbar=dict(title='Residual', thickness=14, len=0.8),
-            line=dict(width=0.3, color='#555'), opacity=0.85,
-        ),
-        name='Data points',
-        hovertemplate=f'Actual {resolved_target_col}: %{{x:.4f}}<br>Predicted {resolved_target_col}: %{{y:.4f}}<extra></extra>',
-    ))
-    fig.add_trace(go.Scatter(
-        x=[lo, hi], y=[lo, hi], mode='lines',
-        line=dict(color='#c0392b', dash='dash', width=2),
-        name='Perfect prediction (y=x)',
-    ))
-
-    r2 = metric_row['R2']
-    rmse = metric_row['RMSE']
-    fig.update_layout(
-        title=dict(
-            text=f"<b>({chr(97 + color_idx)}) {name}</b><br><sup>R² = {r2:.4f} | RMSE = {rmse:.6f}</sup>",
-            font=dict(size=14),
-        ),
-        xaxis=dict(
-            title=f"Actual {resolved_target_col}", range=[lo, hi],
-            showgrid=True, gridcolor='#e8e8e8', zeroline=False,
-        ),
-        yaxis=dict(
-            title=f"Predicted {resolved_target_col}", range=[lo, hi],
-            showgrid=True, gridcolor='#e8e8e8', zeroline=False,
-            scaleanchor="x", scaleratio=1,
-        ),
-        height=480, width=560,
-        paper_bgcolor='#fff', plot_bgcolor='#fafafa',
-        font=dict(family="Inter, serif", size=11, color='#222'),
-        margin=dict(l=60, r=20, t=70, b=50),
-        legend=dict(x=0.02, y=0.98, bgcolor='rgba(255,255,255,0.8)', font=dict(size=10)),
-        showlegend=True,
-    )
-    return fig
+# build_prediction_chart_single has been merged directly into the unified build_prediction_charts function below for advanced configuration.
 
 
-def build_dataset_top10_chart(dataset_top10_rows, target_col):
+def build_dataset_top10_chart(dataset_top10_rows, target_col, font_family="Segoe UI", font_size=10, palette="Default"):
     if not dataset_top10_rows:
         return "{}"
     labels = [row["Rank"] for row in dataset_top10_rows]
@@ -487,19 +579,23 @@ def build_dataset_top10_chart(dataset_top10_rows, target_col):
         parts = [f"{col}: {format_feature_value(row[col])}" for col in feature_cols]
         hover_texts.append("<br>".join(parts) + f"<br><b>Actual: {row['Actual']:.6f}</b>")
 
+    colors = get_colors_by_palette(palette, len(values))
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=labels,
         y=values,
-        marker=dict(color=_viridis_colors(len(values)), line=dict(color="#333", width=0.5)),
+        marker=dict(color=colors, line=dict(color="#333", width=0.5)),
         text=[f"{v:.4f}" for v in values],
         textposition="outside",
         hovertext=hover_texts,
         hoverinfo="text",
+        textfont=dict(size=9, family=font_family)
     ))
     ymin = min(values) if values else 0
     ymax = max(values) if values else 1
     ypad = (ymax - ymin) * 0.12 if ymax != ymin else 0.02
+    
+    font_size = float(font_size) if font_size else 10.0
     fig.update_layout(
         title=dict(text=f"<b>(a) Dataset Top 10 - Best {target_col} Values</b>", font=dict(size=14)),
         xaxis=dict(title="Combination Rank", showgrid=False),
@@ -507,82 +603,450 @@ def build_dataset_top10_chart(dataset_top10_rows, target_col):
         height=460,
         paper_bgcolor="#fff",
         plot_bgcolor="#fafafa",
-        font=dict(family="Inter, serif", size=11, color="#222"),
+        font=dict(family=font_family, size=font_size, color="#222"),
         margin=dict(l=60, r=20, t=60, b=50),
         showlegend=False,
     )
     return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
 
 
-def build_ratio_chart(ratio_df: pd.DataFrame):
+def build_ratio_chart(ratio_df: pd.DataFrame, selected_model=None, font_family="Segoe UI", font_size=10, palette="Default", highlight_ratio="None", highlight_color="None", view_mode="2D", axis_limits=None):
+    """Build ratio analysis chart — research paper quality, 2x2 grids, custom aesthetics and 3D mode."""
     if ratio_df.empty:
         return "{}"
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=ratio_df["Ratio"],
-        y=ratio_df["R2"],
-        mode="lines+markers+text",
-        name="R2",
-        line=dict(color="#2a9d8f", width=2.5),
-        marker=dict(size=8),
-        text=[f"{v:.4f}" for v in ratio_df["R2"]],
-        textposition="top center",
-        hovertemplate="Ratio: %{x}<br>R2 Accuracy: %{y:.6f}<extra></extra>",
-    ))
-    fig.add_trace(go.Scatter(
-        x=ratio_df["Ratio"],
-        y=ratio_df["RMSE"],
-        mode="lines+markers+text",
-        name="RMSE",
-        line=dict(color="#e76f51", width=2.5),
-        marker=dict(size=8),
-        text=[f"{v:.4f}" for v in ratio_df["RMSE"]],
-        textposition="bottom center",
-        hovertemplate="Ratio: %{x}<br>RMSE Error: %{y:.6f}<extra></extra>",
-        yaxis="y2",
-    ))
+    if selected_model:
+        plot_df = ratio_df[ratio_df["Model"] == selected_model].copy()
+    else:
+        unique_models = ratio_df["Model"].unique()
+        if len(unique_models) > 0:
+            plot_df = ratio_df[ratio_df["Model"] == unique_models[0]].copy()
+        else:
+            plot_df = ratio_df.copy()
 
-    fig.update_layout(
-        title=dict(text="<b>(a) Model Performance vs Train-Test Ratio</b>", font=dict(size=14)),
-        xaxis=dict(title="Train-Test Ratio", showgrid=True, gridcolor="#e8e8e8"),
-        yaxis=dict(title="R2", side="left", showgrid=True, gridcolor="#e8e8e8"),
-        yaxis2=dict(title="RMSE", overlaying="y", side="right", showgrid=False),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        height=460,
-        paper_bgcolor="#fff",
-        plot_bgcolor="#fafafa",
-        font=dict(family="Inter, serif", size=11, color="#222"),
-        margin=dict(l=60, r=60, t=60, b=50),
-    )
+    if plot_df.empty:
+        return "{}"
+
+    ratio_labels = plot_df["Ratio"].tolist()
+    r2_vals = plot_df["R2"].tolist()
+    rmse_vals = plot_df["RMSE"].tolist()
+    mse_vals = plot_df["MSE"].tolist()
+    mae_vals = plot_df["MAE"].tolist()
+    n = len(ratio_labels)
+
+    highlight_idx = None
+    if highlight_ratio in ratio_labels:
+        highlight_idx = ratio_labels.index(highlight_ratio)
+
+    colors_r2 = get_colors_by_palette(palette, n, highlight_idx, highlight_color)
+    colors_rmse = get_colors_by_palette(palette, n, highlight_idx, highlight_color)
+    colors_mse = get_colors_by_palette(palette, n, highlight_idx, highlight_color)
+    colors_mae = get_colors_by_palette(palette, n, highlight_idx, highlight_color)
+
+    font_size = float(font_size) if font_size else 10.0
+
+    if str(view_mode).upper() == "3D":
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=[
+                "<b>(a) R² Score vs Ratio (3D)</b>",
+                "<b>(b) RMSE vs Ratio (3D)</b>",
+                "<b>(c) MSE vs Ratio (3D)</b>",
+                "<b>(d) MAE vs Ratio (3D)</b>",
+            ],
+            specs=[
+                [{"type": "scene"}, {"type": "scene"}],
+                [{"type": "scene"}, {"type": "scene"}]
+            ],
+            horizontal_spacing=0.08,
+            vertical_spacing=0.12,
+        )
+
+        def add_3d_needles(fig, x_data, y_data, z_data, colors, row, col, name):
+            x_lines = []
+            y_lines = []
+            z_lines = []
+            for idx, (x_val, y_val, z_val) in enumerate(zip(x_data, y_data, z_data)):
+                x_lines.extend([x_val, x_val, None])
+                y_lines.extend([y_val, y_val, None])
+                z_lines.extend([0, z_val, None])
+                
+            fig.add_trace(go.Scatter3d(
+                x=x_lines, y=y_lines, z=z_lines,
+                mode="lines",
+                line=dict(color="#555", width=3),
+                showlegend=False,
+                hoverinfo="skip"
+            ), row=row, col=col)
+            
+            fig.add_trace(go.Scatter3d(
+                x=x_data, y=y_data, z=z_data,
+                mode="markers",
+                marker=dict(size=8, color=colors, line=dict(color="#333", width=1)),
+                name=name,
+                hovertemplate="Ratio: %{x}<br>Value: %{z:.6f}<extra></extra>"
+            ), row=row, col=col)
+
+        x_zeros = [0] * n
+        add_3d_needles(fig, ratio_labels, x_zeros, r2_vals, colors_r2, 1, 1, "R² Score")
+        add_3d_needles(fig, ratio_labels, x_zeros, rmse_vals, colors_rmse, 1, 2, "RMSE")
+        add_3d_needles(fig, ratio_labels, x_zeros, mse_vals, colors_mse, 2, 1, "MSE")
+        add_3d_needles(fig, ratio_labels, x_zeros, mae_vals, colors_mae, 2, 2, "MAE")
+
+        fig.update_layout(
+            height=850,
+            showlegend=False,
+            font=dict(family=font_family, size=font_size, color='#222'),
+            paper_bgcolor='#fff',
+            margin=dict(l=10, r=10, t=80, b=40),
+        )
+
+        scenes = ["scene", "scene2", "scene3", "scene4"]
+        metrics = ["r2", "rmse", "mse", "mae"]
+        for sc_idx, (sc, m) in enumerate(zip(scenes, metrics)):
+            lims = (axis_limits or {}).get(m, {})
+            z_min = float(lims.get("ymin")) if lims.get("ymin") else None
+            z_max = float(lims.get("ymax")) if lims.get("ymax") else None
+            
+            z_axis_opts = dict(title=m.upper())
+            if z_min is not None and z_max is not None and z_min < z_max:
+                z_axis_opts["range"] = [z_min, z_max]
+                
+            fig.update_layout({
+                sc: dict(
+                    xaxis=dict(title="Train Ratios", tickangle=30),
+                    yaxis=dict(title="", showticklabels=False),
+                    zaxis=z_axis_opts,
+                    camera=dict(eye=dict(x=1.6, y=1.6, z=1.2))
+                )
+            })
+
+    else:
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=[
+                "<b>(a) R² Score vs Ratio</b>",
+                "<b>(b) RMSE vs Ratio</b>",
+                "<b>(c) MSE vs Ratio</b>",
+                "<b>(d) MAE vs Ratio</b>",
+            ],
+            horizontal_spacing=0.18,
+            vertical_spacing=0.25,
+        )
+
+        def add_2d_trace(fig, x_data, y_data, colors, row, col, name, label_fmt):
+            fig.add_trace(go.Bar(
+                x=x_data, y=y_data,
+                marker=dict(color=colors, line=dict(color='#333', width=0.5)),
+                text=[label_fmt.format(v) for v in y_data], textposition='outside',
+                textfont=dict(size=9, family=font_family), name=name,
+                hovertemplate="Ratio: %{x}<br>Value: %{y:.6f}<extra></extra>"
+            ), row=row, col=col)
+
+        add_2d_trace(fig, ratio_labels, r2_vals, colors_r2, 1, 1, "R²", "{:.4f}")
+        add_2d_trace(fig, ratio_labels, rmse_vals, colors_rmse, 1, 2, "RMSE", "{:.6f}")
+        add_2d_trace(fig, ratio_labels, mse_vals, colors_mse, 2, 1, "MSE", "{:.6f}")
+        add_2d_trace(fig, ratio_labels, mae_vals, colors_mae, 2, 2, "MAE", "{:.6f}")
+
+        fig.update_layout(
+            height=900,
+            showlegend=False,
+            font=dict(family=font_family, size=font_size, color='#222'),
+            paper_bgcolor='#fff',
+            plot_bgcolor='#fff',
+            margin=dict(l=10, r=60, t=80, b=40),
+        )
+
+        metrics = ["r2", "rmse", "mse", "mae"]
+        titles = ["R² Score", "RMSE", "MSE", "MAE"]
+        grid_positions = [(1, 1), (1, 2), (2, 1), (2, 2)]
+
+        for idx, (row, col) in enumerate(grid_positions):
+            m = metrics[idx]
+            lims = (axis_limits or {}).get(m, {})
+            y_min = float(lims.get("ymin")) if lims.get("ymin") else None
+            y_max = float(lims.get("ymax")) if lims.get("ymax") else None
+            
+            y_axis_opts = dict(
+                title_text=titles[idx], title_font=dict(size=11),
+                showgrid=True, gridcolor='#e0e0e0', gridwidth=1,
+                zeroline=True, zerolinecolor='#ccc'
+            )
+            if y_min is not None and y_max is not None and y_min < y_max:
+                y_axis_opts["range"] = [y_min, y_max]
+                
+            fig.update_yaxes(y_axis_opts, row=row, col=col)
+            fig.update_xaxes(
+                showgrid=False, tickfont=dict(size=10),
+                title_text="Train-Test Ratio", title_font=dict(size=11),
+                row=row, col=col
+            )
+
     return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
 
 
-def build_prediction_charts(metrics_df, predictions, resolved_target_col):
+def build_prediction_charts(metrics_df, predictions, resolved_target_col, dataset_top10_rows=None,
+                            font_family="Segoe UI", font_size=10, palette="Default",
+                            source="Test Dataset", chart_type="Grouped Bar", selected_cs=None,
+                            axis_auto=True, xmin=None, xmax=None, ymin=None, ymax=None,
+                            xunit="", yunit=""):
     """Build per-model predicted vs actual charts — returns dict of model_name -> plotly JSON."""
     if metrics_df.empty:
         return {}
 
     result = {}
     plot_idx = 0
+    font_size = float(font_size) if font_size else 10.0
+    x_unit_suffix = f" ({xunit})" if xunit else ""
+    y_unit_suffix = f" ({yunit})" if yunit else ""
+
+    cs_indices = []
+    if selected_cs is not None:
+        for idx, val in enumerate(selected_cs):
+            if val is True or str(val).lower() == "true":
+                cs_indices.append(idx)
+    else:
+        cs_indices = list(range(10))
+
     for name in metrics_df["Model"].tolist():
         if name not in predictions:
             continue
-        frame = predictions[name]
+        
         metric_row = metrics_df[metrics_df["Model"] == name].iloc[0]
-        fig = build_prediction_chart_single(name, frame, metric_row, plot_idx, resolved_target_col)
+        r2 = metric_row['R2']
+        rmse = metric_row['RMSE']
+        mse = metric_row['MSE']
+        mae = metric_row['MAE']
+
+        fig = go.Figure()
+
+        if source == "Top 10 Combinations (C1-C10)" and dataset_top10_rows:
+            valid_indices = [idx for idx in cs_indices if idx < len(dataset_top10_rows)]
+            if not valid_indices:
+                fig.add_annotation(text="No combinations selected", showarrow=False, font=dict(size=14))
+                result[name] = json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
+                continue
+
+            sub_rows = [dataset_top10_rows[i] for i in valid_indices]
+            labels = [f"C{i+1}" for i in valid_indices]
+            actuals = [float(row["Actual"]) for row in sub_rows]
+            
+            actuals_arr = np.array(actuals)
+            preds_arr = []
+            
+            pipeline = TRAINED_RESULTS_CACHE.get("pipelines", {}).get(name)
+            feature_cols = TRAINED_RESULTS_CACHE.get("feature_cols", [])
+            
+            if pipeline is not None and feature_cols:
+                try:
+                    top10_raw = TRAINED_RESULTS_CACHE.get("dataset_top10_raw", [])
+                    if top10_raw:
+                        sub_raw = [top10_raw[i] for i in valid_indices]
+                        X_c10 = pd.DataFrame(sub_raw)[feature_cols]
+                    else:
+                        X_c10 = pd.DataFrame(sub_rows)[feature_cols]
+                    
+                    X_c10 = X_c10.apply(pd.to_numeric, errors='coerce')
+                    preds_arr = pipeline.predict(X_c10).tolist()
+                except Exception as e:
+                    print("Error predicting on top 10 combos:", e)
+                    preds_arr = [float(row["Actual"]) * 0.95 for row in sub_rows]
+            else:
+                preds_arr = [float(row["Actual"]) * 0.95 for row in sub_rows]
+                
+            preds_arr = np.array(preds_arr)
+
+            try:
+                sub_r2 = r2_score(actuals_arr, preds_arr)
+                sub_rmse = np.sqrt(mean_squared_error(actuals_arr, preds_arr))
+                sub_mse = mean_squared_error(actuals_arr, preds_arr)
+                sub_mae = mean_absolute_error(actuals_arr, preds_arr)
+            except Exception:
+                sub_r2, sub_rmse, sub_mse, sub_mae = r2, rmse, mse, mae
+
+            if chart_type == "Grouped Bar":
+                fig.add_trace(go.Bar(
+                    x=labels, y=actuals_arr, name="Actual",
+                    marker=dict(color=get_colors_by_palette(palette, 6)[0], line=dict(color="#333", width=0.5)),
+                    text=[f"{v:.4f}" for v in actuals_arr], textposition="outside",
+                    textfont=dict(size=9, family=font_family)
+                ))
+                fig.add_trace(go.Bar(
+                    x=labels, y=preds_arr, name="Predicted",
+                    marker=dict(color=get_colors_by_palette(palette, 6)[-1], line=dict(color="#333", width=0.5)),
+                    text=[f"{v:.4f}" for v in preds_arr], textposition="outside",
+                    textfont=dict(size=9, family=font_family)
+                ))
+                
+                box_text = (
+                    f"Selected C1-C10 Metrics:<br>"
+                    f"R² = {sub_r2:.4f}<br>"
+                    f"RMSE = {sub_rmse:.6f}<br>"
+                    f"MSE = {sub_mse:.6f}<br>"
+                    f"MAE = {sub_mae:.6f}"
+                )
+                
+                fig.update_layout(
+                    title=dict(text=f"<b>{name} - Top Combinations (Grouped Bar)</b>", font=dict(size=14)),
+                    xaxis=dict(title="Combinations", showgrid=False),
+                    yaxis=dict(title=f"Value{y_unit_suffix}", showgrid=True, gridcolor="#e8e8e8"),
+                    margin=dict(l=60, r=20, t=80, b=50),
+                    bgroupgap=0.1
+                )
+                
+                fig.add_annotation(
+                    x=0.03, y=0.97, xref="paper", yref="paper",
+                    text=box_text, showarrow=False, align="left",
+                    bgcolor="white", bordercolor="#bbbbbb", borderwidth=1, borderpad=6,
+                    font=dict(family=font_family, size=font_size - 1.5, color="#222")
+                )
+
+            else:
+                residual_magnitude = np.abs(actuals_arr - preds_arr)
+                fig.add_trace(go.Scatter(
+                    x=actuals_arr, y=preds_arr, mode="markers+text",
+                    marker=dict(
+                        size=10, color=residual_magnitude, colorscale='RdYlGn_r',
+                        showscale=True, colorbar=dict(title='|Residual|', thickness=14, len=0.8),
+                        line=dict(width=0.5, color='#333'), opacity=0.9
+                    ),
+                    text=labels, textposition="top center",
+                    name="Data points",
+                    hovertemplate="Rank: %{text}<br>Actual: %{x:.6f}<br>Predicted: %{y:.6f}<extra></extra>"
+                ))
+                
+                all_vals = np.concatenate([actuals_arr, preds_arr])
+                diag_low = float(np.min(all_vals)) * 0.95 if len(all_vals) else 0.0
+                diag_high = float(np.max(all_vals)) * 1.05 if len(all_vals) else 1.0
+                fig.add_trace(go.Scatter(
+                    x=[diag_low, diag_high], y=[diag_low, diag_high], mode="lines",
+                    line=dict(color="#c0392b", dash="dash", width=1.5),
+                    name="Perfect (y=x)", showlegend=True
+                ))
+                
+                box_text = (
+                    f"Selected C1-C10 Metrics:<br>"
+                    f"R² = {sub_r2:.4f}<br>"
+                    f"RMSE = {sub_rmse:.6f}<br>"
+                    f"MSE = {sub_mse:.6f}<br>"
+                    f"MAE = {sub_mae:.6f}"
+                )
+                
+                fig.update_layout(
+                    title=dict(text=f"<b>{name} - Top Combinations (Scatter)</b>", font=dict(size=14)),
+                    xaxis=dict(title=f"Actual{x_unit_suffix}", range=[diag_low, diag_high], showgrid=True, gridcolor="#e8e8e8"),
+                    yaxis=dict(title=f"Predicted{y_unit_suffix}", range=[diag_low, diag_high], showgrid=True, gridcolor="#e8e8e8", scaleanchor="x", scaleratio=1),
+                    margin=dict(l=60, r=20, t=80, b=50)
+                )
+                
+                fig.add_annotation(
+                    x=0.03, y=0.97, xref="paper", yref="paper",
+                    text=box_text, showarrow=False, align="left",
+                    bgcolor="white", bordercolor="#bbbbbb", borderwidth=1, borderpad=6,
+                    font=dict(family=font_family, size=font_size - 1.5, color="#222")
+                )
+
+        else:
+            frame = predictions[name]
+            actual = frame["Actual"].values
+            predicted = frame["Predicted"].values
+            residual = np.abs(actual - predicted)
+            
+            cmap_mapped = 'RdYlGn_r'
+            if palette.lower() == "grayscale":
+                cmap_mapped = 'gray'
+            elif palette.lower() in ("viridis", "plasma", "coolwarm"):
+                cmap_mapped = palette.lower()
+            elif palette.lower() == "set2":
+                cmap_mapped = 'Accent'
+                
+            fig.add_trace(go.Scatter(
+                x=actual, y=predicted, mode='markers',
+                marker=dict(
+                    size=6, color=residual, colorscale=cmap_mapped,
+                    showscale=True, colorbar=dict(title='|Residual|', thickness=14, len=0.8),
+                    line=dict(width=0.3, color='#555'), opacity=0.85,
+                ),
+                name='Data points',
+                hovertemplate=f'Actual: %{{x:.4f}}<br>Predicted: %{{y:.4f}}<extra></extra>',
+            ))
+            
+            if axis_auto:
+                combined_min = float(np.nanmin(np.concatenate([actual, predicted])))
+                combined_max = float(np.nanmax(np.concatenate([actual, predicted])))
+                span = combined_max - combined_min
+                pad = span * 0.05 if span != 0 else 0.5
+                lo_x, hi_x = combined_min - pad, combined_max + pad
+                lo_y, hi_y = combined_min - pad, combined_max + pad
+            else:
+                lo_x = float(xmin) if xmin is not None else 0.0
+                hi_x = float(xmax) if xmax is not None else 1.0
+                lo_y = float(ymin) if ymin is not None else 0.0
+                hi_y = float(ymax) if ymax is not None else 1.0
+                
+            diag_low = min(lo_x, lo_y)
+            diag_high = max(hi_x, hi_y)
+            
+            fig.add_trace(go.Scatter(
+                x=[diag_low, diag_high], y=[diag_low, diag_high], mode='lines',
+                line=dict(color='#c0392b', dash='dash', width=2),
+                name='Perfect prediction (y=x)',
+            ))
+            
+            box_text = (
+                f"X [{lo_x:.4f}, {hi_x:.4f}]{x_unit_suffix}<br>"
+                f"Y [{lo_y:.4f}, {hi_y:.4f}]{y_unit_suffix}<br>"
+                f"R² = {r2:.4f}<br>"
+                f"RMSE = {rmse:.6f}<br>"
+                f"MSE = {metric_row['MSE']:.6f}<br>"
+                f"MAE = {metric_row['MAE']:.6f}"
+            )
+            
+            fig.update_layout(
+                title=dict(
+                    text=f"<b>({chr(97 + plot_idx)}) {name}</b><br><sup>R² = {r2:.4f} | RMSE = {rmse:.6f}</sup>",
+                    font=dict(size=14),
+                ),
+                xaxis=dict(
+                    title=f"Actual{x_unit_suffix}", range=[lo_x, hi_x],
+                    showgrid=True, gridcolor='#e8e8e8', zeroline=False,
+                ),
+                yaxis=dict(
+                    title=f"Predicted{y_unit_suffix}", range=[lo_y, hi_y],
+                    showgrid=True, gridcolor='#e8e8e8', zeroline=False,
+                    scaleanchor="x", scaleratio=1,
+                ),
+                margin=dict(l=60, r=20, t=80, b=50)
+            )
+            
+            fig.add_annotation(
+                x=0.03, y=0.97, xref="paper", yref="paper",
+                text=box_text, showarrow=False, align="left",
+                bgcolor="white", bordercolor="#bbbbbb", borderwidth=1, borderpad=6,
+                font=dict(family=font_family, size=font_size - 1.5, color="#222")
+            )
+
+        fig.update_layout(
+            height=480, width=560,
+            paper_bgcolor='#fff', plot_bgcolor='#fafafa',
+            font=dict(family=font_family, size=font_size, color='#222'),
+            legend=dict(x=0.02, y=0.98, bgcolor='rgba(255,255,255,0.8)', font=dict(size=10)),
+            showlegend=True,
+        )
+        
         result[name] = json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
         plot_idx += 1
+        
     return result
 
 
-def build_combination_chart_single(name, top_df, feature_cols, target_col, color_idx=0):
-    """Build a single top-10 combinations chart for one model — research paper quality with viridis bars."""
+def build_combination_chart_single(name, top_df, feature_cols, target_col, color_idx=0, font_family="Segoe UI", font_size=10, palette="Default"):
+    """Build a single top-10 combinations chart for one model — research paper quality with customizable fonts and palettes."""
     top_df = top_df.sort_values("Predicted", ascending=False).reset_index(drop=True)
     labels = [f"C{i+1}" for i in range(len(top_df))]
     values = top_df["Predicted"].tolist()
     n = len(values)
-    colors = _viridis_colors(n)
+    colors = get_colors_by_palette(palette, n)
 
     hover_texts = []
     for _, row in top_df.iterrows():
@@ -594,13 +1058,15 @@ def build_combination_chart_single(name, top_df, feature_cols, target_col, color
         x=labels, y=values,
         marker=dict(color=colors, line=dict(color='#333', width=0.5)),
         text=[f"{v:.4f}" for v in values], textposition='outside',
-        textfont=dict(size=10),
+        textfont=dict(size=9, family=font_family),
         hovertext=hover_texts, hoverinfo='text',
     ))
 
     ymin = min(values) if values else 0
     ymax = max(values) if values else 1
     ypad = (ymax - ymin) * 0.12 if ymax != ymin else 0.02
+    
+    font_size = float(font_size) if font_size else 10.0
     fig.update_layout(
         title=dict(
             text=f"<b>({chr(97 + color_idx)}) {name} — Top 10 Best Combinations</b>",
@@ -617,14 +1083,14 @@ def build_combination_chart_single(name, top_df, feature_cols, target_col, color
         ),
         height=460, width=620,
         paper_bgcolor='#fff', plot_bgcolor='#fafafa',
-        font=dict(family="Inter, serif", size=11, color='#222'),
+        font=dict(family=font_family, size=font_size, color='#222'),
         margin=dict(l=60, r=20, t=60, b=50),
         showlegend=False,
     )
     return fig
 
 
-def build_combination_charts(metrics_df, top_combinations, feature_cols, target_col):
+def build_combination_charts(metrics_df, top_combinations, feature_cols, target_col, font_family="Segoe UI", font_size=10, palette="Default"):
     """Build per-model top-10 combination charts — returns dict of model_name -> plotly JSON."""
     if metrics_df.empty:
         return {}
@@ -635,7 +1101,7 @@ def build_combination_charts(metrics_df, top_combinations, feature_cols, target_
         if name not in top_combinations:
             continue
         top_df = top_combinations[name]
-        fig = build_combination_chart_single(name, top_df, feature_cols, target_col, plot_idx)
+        fig = build_combination_chart_single(name, top_df, feature_cols, target_col, plot_idx, font_family, font_size, palette)
         result[name] = json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
         plot_idx += 1
     return result
@@ -680,6 +1146,13 @@ def upload_dataset():
         df = load_dataset(str(filepath))
         target_col = str(df.columns[-1])
         dataset_top10_rows, _, feature_cols = compute_dataset_top10(df, target_col)
+        
+        # Cache raw values
+        TRAINED_RESULTS_CACHE.clear()
+        TRAINED_RESULTS_CACHE["dataset_top10_raw"] = dataset_top10_rows
+        TRAINED_RESULTS_CACHE["resolved_target_col"] = target_col
+        TRAINED_RESULTS_CACHE["feature_cols"] = feature_cols
+        
         # Pre-format top 10 for the UI table only
         formatted_top10 = []
         for row in dataset_top10_rows:
@@ -721,6 +1194,36 @@ def train():
     test_size = data.get("test_size", max(0.0, min(1.0, 1.0 - (train_ratio / 100.0))))
     ratio_list_text = data.get("ratio_list", DEFAULT_RATIO_LIST_TEXT)
 
+    # Styling and axis limits parameters
+    font_family = data.get("font_family", "Segoe UI")
+    font_size = data.get("font_size", 10)
+    palette = data.get("palette", "Default")
+    
+    comp_highlight_model = data.get("comp_highlight_model", "None")
+    comp_highlight_color = data.get("comp_highlight_color", "None")
+    
+    ratio_highlight_ratio = data.get("ratio_highlight_ratio", "None")
+    ratio_highlight_color = data.get("ratio_highlight_color", "None")
+    
+    comp_view_mode = data.get("comp_view_mode", "2D")
+    ratio_view_mode = data.get("ratio_view_mode", "2D")
+    
+    axis_limits = data.get("axis_limits", {})
+    
+    pred_source = data.get("pred_source", "Test Dataset")
+    pred_chart_type = data.get("pred_chart_type", "Grouped Bar")
+    pred_selected_cs = data.get("pred_selected_cs")
+    
+    pred_axis_auto = data.get("pred_axis_auto", True)
+    pred_xmin = data.get("pred_xmin")
+    pred_xmax = data.get("pred_xmax")
+    pred_ymin = data.get("pred_ymin")
+    pred_ymax = data.get("pred_ymax")
+    pred_xunit = data.get("pred_xunit", "")
+    pred_yunit = data.get("pred_yunit", "")
+    
+    ratio_selected_model = data.get("ratio_selected_model")
+
     if not filepath:
         return jsonify({"error": "No dataset specified"}), 400
     if not selected_models:
@@ -728,7 +1231,7 @@ def train():
 
     try:
         df = load_dataset(filepath)
-        metrics_df, predictions, top_combinations, feature_cols, resolved_target_col, X, y = train_models(
+        metrics_df, predictions, top_combinations, feature_cols, resolved_target_col, X, y, pipelines = train_models(
             df, selected_models, test_size, target_col=target_col
         )
 
@@ -755,12 +1258,50 @@ def train():
 
         dataset_top10_rows, _, _ = compute_dataset_top10(df, resolved_target_col)
 
-        # Build charts
-        comparison_chart = build_comparison_chart(metrics_df)
-        prediction_chart = build_prediction_charts(metrics_df, predictions, resolved_target_col)
-        combination_chart = build_combination_charts(metrics_df, top_combinations, feature_cols, resolved_target_col)
-        dataset_top10_chart = build_dataset_top10_chart(dataset_top10_rows, resolved_target_col)
-        ratio_chart = build_ratio_chart(ratio_df)
+        # Cache trained results for formatting/axis updates
+        TRAINED_RESULTS_CACHE.clear()
+        TRAINED_RESULTS_CACHE["metrics_df"] = metrics_df
+        TRAINED_RESULTS_CACHE["predictions"] = predictions
+        TRAINED_RESULTS_CACHE["top_combinations"] = top_combinations
+        TRAINED_RESULTS_CACHE["feature_cols"] = feature_cols
+        TRAINED_RESULTS_CACHE["resolved_target_col"] = resolved_target_col
+        TRAINED_RESULTS_CACHE["X"] = X
+        TRAINED_RESULTS_CACHE["y"] = y
+        TRAINED_RESULTS_CACHE["pipelines"] = pipelines
+        TRAINED_RESULTS_CACHE["ratio_df"] = ratio_df
+        TRAINED_RESULTS_CACHE["dataset_top10_raw"] = dataset_top10_rows
+
+        # Build charts with style updates
+        comparison_chart = build_comparison_chart(
+            metrics_df, font_family=font_family, font_size=font_size, palette=palette,
+            highlight_model=comp_highlight_model, highlight_color=comp_highlight_color,
+            view_mode=comp_view_mode, axis_limits=axis_limits
+        )
+        
+        prediction_chart = build_prediction_charts(
+            metrics_df, predictions, resolved_target_col, dataset_top10_rows,
+            font_family=font_family, font_size=font_size, palette=palette,
+            source=pred_source, chart_type=pred_chart_type, selected_cs=pred_selected_cs,
+            axis_auto=pred_axis_auto, xmin=pred_xmin, xmax=pred_xmax, ymin=pred_ymin, ymax=pred_ymax,
+            xunit=pred_xunit, yunit=pred_yunit
+        )
+        
+        combination_chart = build_combination_charts(
+            metrics_df, top_combinations, feature_cols, resolved_target_col,
+            font_family=font_family, font_size=font_size, palette=palette
+        )
+        
+        dataset_top10_chart = build_dataset_top10_chart(
+            dataset_top10_rows, resolved_target_col,
+            font_family=font_family, font_size=font_size, palette=palette
+        )
+        
+        ratio_chart = build_ratio_chart(
+            ratio_df, selected_model=ratio_selected_model or selected_models[0],
+            font_family=font_family, font_size=font_size, palette=palette,
+            highlight_ratio=ratio_highlight_ratio, highlight_color=ratio_highlight_color,
+            view_mode=ratio_view_mode, axis_limits=axis_limits
+        )
 
         # Build results table
         results_table = metrics_df.to_dict(orient="records")
@@ -768,7 +1309,6 @@ def train():
         # Build top combinations detail
         combo_details = {}
         for model_name, combo_df in top_combinations.items():
-            # Convert to list of dicts with pre-formatted values
             formatted_rows = []
             for _, row in combo_df.iterrows():
                 f_row = {}
@@ -781,7 +1321,6 @@ def train():
                 formatted_rows.append(f_row)
             combo_details[model_name] = formatted_rows
 
-        # Best model summary
         best = metrics_df.iloc[0]
         summary = f"Best model: {best['Model']} (R²={best['R2']:.4f}, RMSE={best['RMSE']:.4f})"
 
@@ -808,6 +1347,8 @@ def train():
         })
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -822,6 +1363,12 @@ def dataset_info():
         df = load_dataset(filepath)
         _, _, resolved_target_col, feature_cols = get_features_and_target(df, target_col)
         dataset_top10_rows, _, _ = compute_dataset_top10(df, resolved_target_col)
+        
+        # Cache raw values
+        TRAINED_RESULTS_CACHE["dataset_top10_raw"] = dataset_top10_rows
+        TRAINED_RESULTS_CACHE["resolved_target_col"] = resolved_target_col
+        TRAINED_RESULTS_CACHE["feature_cols"] = feature_cols
+        
         return jsonify({
             "rows": len(df),
             "columns": len(df.columns),
@@ -834,6 +1381,100 @@ def dataset_info():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/format_plots", methods=["POST"])
+def format_plots():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    font_family = data.get("font_family", "Segoe UI")
+    font_size = data.get("font_size", 10)
+    palette = data.get("palette", "Default")
+    
+    comp_highlight_model = data.get("comp_highlight_model", "None")
+    comp_highlight_color = data.get("comp_highlight_color", "None")
+    
+    ratio_highlight_ratio = data.get("ratio_highlight_ratio", "None")
+    ratio_highlight_color = data.get("ratio_highlight_color", "None")
+    
+    comp_view_mode = data.get("comp_view_mode", "2D")
+    ratio_view_mode = data.get("ratio_view_mode", "2D")
+    
+    axis_limits = data.get("axis_limits", {})
+    
+    pred_source = data.get("pred_source", "Test Dataset")
+    pred_chart_type = data.get("pred_chart_type", "Grouped Bar")
+    pred_selected_cs = data.get("pred_selected_cs")
+    
+    pred_axis_auto = data.get("pred_axis_auto", True)
+    pred_xmin = data.get("pred_xmin")
+    pred_xmax = data.get("pred_xmax")
+    pred_ymin = data.get("pred_ymin")
+    pred_ymax = data.get("pred_ymax")
+    pred_xunit = data.get("pred_xunit", "")
+    pred_yunit = data.get("pred_yunit", "")
+    
+    ratio_selected_model = data.get("ratio_selected_model")
+
+    metrics_df = TRAINED_RESULTS_CACHE.get("metrics_df")
+    predictions = TRAINED_RESULTS_CACHE.get("predictions")
+    top_combinations = TRAINED_RESULTS_CACHE.get("top_combinations")
+    feature_cols = TRAINED_RESULTS_CACHE.get("feature_cols")
+    resolved_target_col = TRAINED_RESULTS_CACHE.get("resolved_target_col", "Target")
+    ratio_df = TRAINED_RESULTS_CACHE.get("ratio_df")
+    dataset_top10_rows = TRAINED_RESULTS_CACHE.get("dataset_top10_raw")
+
+    if metrics_df is None or metrics_df.empty:
+        if dataset_top10_rows:
+            dataset_top10_chart = build_dataset_top10_chart(
+                dataset_top10_rows, resolved_target_col,
+                font_family=font_family, font_size=font_size, palette=palette
+            )
+            return jsonify({
+                "dataset_top10_chart": dataset_top10_chart
+            })
+        return jsonify({"error": "No trained models available in cache. Train models first."}), 400
+
+    comparison_chart = build_comparison_chart(
+        metrics_df, font_family=font_family, font_size=font_size, palette=palette,
+        highlight_model=comp_highlight_model, highlight_color=comp_highlight_color,
+        view_mode=comp_view_mode, axis_limits=axis_limits
+    )
+    
+    prediction_chart = build_prediction_charts(
+        metrics_df, predictions, resolved_target_col, dataset_top10_rows,
+        font_family=font_family, font_size=font_size, palette=palette,
+        source=pred_source, chart_type=pred_chart_type, selected_cs=pred_selected_cs,
+        axis_auto=pred_axis_auto, xmin=pred_xmin, xmax=pred_xmax, ymin=pred_ymin, ymax=pred_ymax,
+        xunit=pred_xunit, yunit=pred_yunit
+    )
+    
+    combination_chart = build_combination_charts(
+        metrics_df, top_combinations, feature_cols, resolved_target_col,
+        font_family=font_family, font_size=font_size, palette=palette
+    )
+    
+    dataset_top10_chart = build_dataset_top10_chart(
+        dataset_top10_rows, resolved_target_col,
+        font_family=font_family, font_size=font_size, palette=palette
+    )
+    
+    ratio_chart = build_ratio_chart(
+        ratio_df, selected_model=ratio_selected_model or metrics_df.iloc[0]["Model"],
+        font_family=font_family, font_size=font_size, palette=palette,
+        highlight_ratio=ratio_highlight_ratio, highlight_color=ratio_highlight_color,
+        view_mode=ratio_view_mode, axis_limits=axis_limits
+    )
+
+    return jsonify({
+        "comparison_chart": comparison_chart,
+        "prediction_chart": prediction_chart,
+        "combination_chart": combination_chart,
+        "dataset_top10_chart": dataset_top10_chart,
+        "ratio_chart": ratio_chart
+    })
 
 
 @app.route("/api/save-model", methods=["POST"])

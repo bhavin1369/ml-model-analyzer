@@ -255,6 +255,76 @@ class ModelWorkbenchGUI:
         self.progress_var = tk.DoubleVar(value=0.0)
         self._canvas_interactions = {}
 
+        # Actual vs Predicted C1-C10 Filtering
+        self.prediction_source_var = tk.StringVar(value="Test Dataset")
+        self.prediction_chart_type_var = tk.StringVar(value="Grouped Bar")
+        self.prediction_c_vars = {f"C{i}": tk.BooleanVar(value=True) for i in range(1, 11)}
+
+        # Top 10 Evaluation Toggles
+        self.evaluation_dataset_var = tk.StringVar(value="Full Test Set")
+        self.metrics_test_df = pd.DataFrame()
+        self.metrics_c10_df = pd.DataFrame()
+
+        # Comparison Tab Axis Limit StringVars
+        self.comp_r2_xmin_var = tk.StringVar(value="")
+        self.comp_r2_xmax_var = tk.StringVar(value="")
+        self.comp_r2_ymin_var = tk.StringVar(value="")
+        self.comp_r2_ymax_var = tk.StringVar(value="")
+
+        self.comp_rmse_xmin_var = tk.StringVar(value="")
+        self.comp_rmse_xmax_var = tk.StringVar(value="")
+        self.comp_rmse_ymin_var = tk.StringVar(value="")
+        self.comp_rmse_ymax_var = tk.StringVar(value="")
+
+        self.comp_mse_xmin_var = tk.StringVar(value="")
+        self.comp_mse_xmax_var = tk.StringVar(value="")
+        self.comp_mse_ymin_var = tk.StringVar(value="")
+        self.comp_mse_ymax_var = tk.StringVar(value="")
+
+        self.comp_mae_xmin_var = tk.StringVar(value="")
+        self.comp_mae_xmax_var = tk.StringVar(value="")
+        self.comp_mae_ymin_var = tk.StringVar(value="")
+        self.comp_mae_ymax_var = tk.StringVar(value="")
+
+        # Ratio Tab Axis Limit StringVars
+        self.ratio_r2_xmin_var = tk.StringVar(value="")
+        self.ratio_r2_xmax_var = tk.StringVar(value="")
+        self.ratio_r2_ymin_var = tk.StringVar(value="")
+        self.ratio_r2_ymax_var = tk.StringVar(value="")
+
+        self.ratio_rmse_xmin_var = tk.StringVar(value="")
+        self.ratio_rmse_xmax_var = tk.StringVar(value="")
+        self.ratio_rmse_ymin_var = tk.StringVar(value="")
+        self.ratio_rmse_ymax_var = tk.StringVar(value="")
+
+        self.ratio_mse_xmin_var = tk.StringVar(value="")
+        self.ratio_mse_xmax_var = tk.StringVar(value="")
+        self.ratio_mse_ymin_var = tk.StringVar(value="")
+        self.ratio_mse_ymax_var = tk.StringVar(value="")
+
+        self.ratio_mae_xmin_var = tk.StringVar(value="")
+        self.ratio_mae_xmax_var = tk.StringVar(value="")
+        self.ratio_mae_ymin_var = tk.StringVar(value="")
+        self.ratio_mae_ymax_var = tk.StringVar(value="")
+
+        # Research paper plot formatting options
+        self.plot_font_family = tk.StringVar(value="Segoe UI")
+        self.plot_font_size = tk.StringVar(value="10")
+        self.plot_color_palette = tk.StringVar(value="Default")
+        
+        self.comp_highlight_model_var = tk.StringVar(value="None")
+        self.comp_highlight_color_var = tk.StringVar(value="None")
+        
+        self.ratio_highlight_ratio_var = tk.StringVar(value="None")
+        self.ratio_highlight_color_var = tk.StringVar(value="None")
+
+        self._comp_axis_update_after_id = None
+        self._ratio_axis_update_after_id = None
+
+        self._bind_comparison_axis_traces()
+        self._bind_ratio_axis_traces()
+        self._bind_formatting_traces()
+
         self._setup_matplotlib_defaults()
         self._configure_style()
         self._build_layout()
@@ -451,7 +521,7 @@ class ModelWorkbenchGUI:
         if changed:
             canvas.draw_idle()
 
-    def _build_graph_section(self, parent, title, fullscreen_command):
+    def _build_graph_section(self, parent, title, fullscreen_command, filter_below_header=False):
         container = ttk.Frame(parent)
         container.pack(fill="both", expand=True)
 
@@ -463,8 +533,12 @@ class ModelWorkbenchGUI:
         right_controls = ttk.Frame(header)
         right_controls.pack(side="right")
 
-        filter_frame = ttk.Frame(right_controls)
-        filter_frame.pack(side="left", padx=(0, 8))
+        if filter_below_header:
+            filter_frame = ttk.Frame(container, padding=(8, 4))
+            filter_frame.pack(fill="x", padx=8, pady=4)
+        else:
+            filter_frame = ttk.Frame(right_controls)
+            filter_frame.pack(side="left", padx=(0, 8))
 
         ttk.Button(right_controls, text="Full Screen", command=fullscreen_command).pack(side="left")
 
@@ -486,36 +560,259 @@ class ModelWorkbenchGUI:
     def _build_comparison_mode_controls(self, parent):
         for child in parent.winfo_children():
             child.destroy()
-        ttk.Label(parent, text="View:").pack(side="left", padx=(0, 6))
+            
+        left_side = ttk.Frame(parent)
+        left_side.pack(side="left", fill="both", expand=False)
+        
+        view_frame = ttk.Frame(left_side)
+        view_frame.pack(side="top", fill="x", anchor="w", pady=(0, 4))
+        
+        ttk.Label(view_frame, text="View:").pack(side="left", padx=(0, 6))
 
         for mode in ("2D", "3D"):
             ttk.Radiobutton(
-                parent,
+                view_frame,
                 text=mode,
                 value=mode,
                 variable=self.comparison_mode_var,
                 command=self._on_comparison_mode_change,
             ).pack(side="left", padx=(0, 4))
+            
+        self._build_formatting_controls(left_side, "comp", self._update_metric_charts)
+        self._build_axis_limits_grid(parent, "comp", self._update_metric_charts)
 
     def _build_ratio_mode_controls(self, parent):
         for child in parent.winfo_children():
             child.destroy()
         
-        ttk.Label(parent, text="Model:").pack(side="left", padx=(0, 4))
-        self.ratio_model_combo = ttk.Combobox(parent, textvariable=self.ratio_model_var, state="readonly", width=18)
+        left_side = ttk.Frame(parent)
+        left_side.pack(side="left", fill="both", expand=False)
+        
+        ratio_frame = ttk.Frame(left_side)
+        ratio_frame.pack(side="top", fill="x", anchor="w", pady=(0, 4))
+        
+        ttk.Label(ratio_frame, text="Model:").pack(side="left", padx=(0, 4))
+        self.ratio_model_combo = ttk.Combobox(ratio_frame, textvariable=self.ratio_model_var, state="readonly", width=18)
         self.ratio_model_combo.pack(side="left", padx=(0, 10))
         self.ratio_model_combo.bind("<<ComboboxSelected>>", lambda e: self._on_ratio_mode_change())
 
-        ttk.Label(parent, text="View:").pack(side="left", padx=(0, 6))
+        ttk.Label(ratio_frame, text="View:").pack(side="left", padx=(0, 6))
 
         for mode in ("2D", "3D"):
             ttk.Radiobutton(
-                parent,
+                ratio_frame,
                 text=mode,
                 value=mode,
                 variable=self.ratio_mode_var,
                 command=self._on_ratio_mode_change,
             ).pack(side="left", padx=(0, 4))
+            
+        self._build_formatting_controls(left_side, "ratio", self._update_ratio_chart)
+        self._build_axis_limits_grid(parent, "ratio", self._update_ratio_chart)
+
+    def _build_axis_limits_grid(self, parent, prefix, apply_command):
+        grid_frame = ttk.LabelFrame(parent, text="Axis Limits (X: [Min, Max], Y: [Min, Max])", padding=6)
+        grid_frame.pack(side="left", fill="x", expand=True, padx=(12, 0))
+        
+        metrics = ["R2", "RMSE", "MSE", "MAE"]
+        
+        for idx, m in enumerate(metrics):
+            ttk.Label(grid_frame, text=f"{m}:", font=("Segoe UI", 9, "bold")).grid(row=idx, column=0, padx=(2, 6), pady=2, sticky="w")
+            
+            xmin_var = getattr(self, f"{prefix}_{m.lower()}_xmin_var")
+            xmax_var = getattr(self, f"{prefix}_{m.lower()}_xmax_var")
+            ymin_var = getattr(self, f"{prefix}_{m.lower()}_ymin_var")
+            ymax_var = getattr(self, f"{prefix}_{m.lower()}_ymax_var")
+            
+            ttk.Label(grid_frame, text="X Min:").grid(row=idx, column=1, padx=(2, 2), pady=2, sticky="e")
+            ttk.Entry(grid_frame, textvariable=xmin_var, width=6).grid(row=idx, column=2, padx=(0, 6), pady=2, sticky="w")
+            
+            ttk.Label(grid_frame, text="X Max:").grid(row=idx, column=3, padx=(2, 2), pady=2, sticky="e")
+            ttk.Entry(grid_frame, textvariable=xmax_var, width=6).grid(row=idx, column=4, padx=(0, 6), pady=2, sticky="w")
+            
+            ttk.Label(grid_frame, text="Y Min:").grid(row=idx, column=5, padx=(6, 2), pady=2, sticky="e")
+            ttk.Entry(grid_frame, textvariable=ymin_var, width=6).grid(row=idx, column=6, padx=(0, 6), pady=2, sticky="w")
+            
+            ttk.Label(grid_frame, text="Y Max:").grid(row=idx, column=7, padx=(2, 2), pady=2, sticky="e")
+            ttk.Entry(grid_frame, textvariable=ymax_var, width=6).grid(row=idx, column=8, padx=(0, 2), pady=2, sticky="w")
+            
+        apply_btn = ttk.Button(grid_frame, text="Apply", command=apply_command, width=8)
+        apply_btn.grid(row=0, column=9, rowspan=4, padx=(10, 2), pady=2, sticky="ns")
+
+    def _bind_comparison_axis_traces(self):
+        vars_to_bind = [
+            self.comp_r2_xmin_var, self.comp_r2_xmax_var, self.comp_r2_ymin_var, self.comp_r2_ymax_var,
+            self.comp_rmse_xmin_var, self.comp_rmse_xmax_var, self.comp_rmse_ymin_var, self.comp_rmse_ymax_var,
+            self.comp_mse_xmin_var, self.comp_mse_xmax_var, self.comp_mse_ymin_var, self.comp_mse_ymax_var,
+            self.comp_mae_xmin_var, self.comp_mae_xmax_var, self.comp_mae_ymin_var, self.comp_mae_ymax_var,
+        ]
+        for v in vars_to_bind:
+            try:
+                v.trace_add("write", lambda *a: self._schedule_comparison_axis_update())
+            except Exception:
+                pass
+
+    def _schedule_comparison_axis_update(self):
+        try:
+            if getattr(self, "_comp_axis_update_after_id", None):
+                try:
+                    self.root.after_cancel(self._comp_axis_update_after_id)
+                except Exception:
+                    pass
+            self._comp_axis_update_after_id = self.root.after(250, self._update_metric_charts)
+        except Exception:
+            try:
+                self._update_metric_charts()
+            except Exception:
+                pass
+
+    def _bind_ratio_axis_traces(self):
+        vars_to_bind = [
+            self.ratio_r2_xmin_var, self.ratio_r2_xmax_var, self.ratio_r2_ymin_var, self.ratio_r2_ymax_var,
+            self.ratio_rmse_xmin_var, self.ratio_rmse_xmax_var, self.ratio_rmse_ymin_var, self.ratio_rmse_ymax_var,
+            self.ratio_mse_xmin_var, self.ratio_mse_xmax_var, self.ratio_mse_ymin_var, self.ratio_mse_ymax_var,
+            self.ratio_mae_xmin_var, self.ratio_mae_xmax_var, self.ratio_mae_ymin_var, self.ratio_mae_ymax_var,
+        ]
+        for v in vars_to_bind:
+            try:
+                v.trace_add("write", lambda *a: self._schedule_ratio_axis_update())
+            except Exception:
+                pass
+
+    def _schedule_ratio_axis_update(self):
+        try:
+            if getattr(self, "_ratio_axis_update_after_id", None):
+                try:
+                    self.root.after_cancel(self._ratio_axis_update_after_id)
+                except Exception:
+                    pass
+            self._ratio_axis_update_after_id = self.root.after(250, self._update_ratio_chart)
+        except Exception:
+            try:
+                self._update_ratio_chart()
+            except Exception:
+                pass
+
+    def _bind_formatting_traces(self):
+        vars_to_bind = [
+            self.plot_font_family,
+            self.plot_font_size,
+            self.plot_color_palette,
+            self.comp_highlight_model_var,
+            self.comp_highlight_color_var,
+            self.ratio_highlight_ratio_var,
+            self.ratio_highlight_color_var,
+        ]
+        for v in vars_to_bind:
+            try:
+                v.trace_add("write", lambda *a: self._schedule_formatting_update())
+            except Exception:
+                pass
+
+    def _schedule_formatting_update(self):
+        try:
+            self._schedule_comparison_axis_update()
+            self._schedule_ratio_axis_update()
+            
+            if hasattr(self, "pred_canvas") and self.pred_canvas:
+                self._update_prediction_chart()
+            if hasattr(self, "combo_canvas") and self.combo_canvas:
+                self._update_combination_chart()
+            if hasattr(self, "dataset_top10_canvas") and self.dataset_top10_canvas:
+                self._update_dataset_top10_chart()
+        except Exception:
+            pass
+
+    def _build_formatting_controls(self, parent, prefix, apply_command):
+        fmt_frame = ttk.LabelFrame(parent, text="Plot Formatting (Font & Colors)", padding=6)
+        fmt_frame.pack(side="top", fill="both", expand=True, padx=2, pady=2)
+        
+        # Row 0: Font Family, Font Size
+        ttk.Label(fmt_frame, text="Font:").grid(row=0, column=0, padx=2, pady=2, sticky="e")
+        font_combo = ttk.Combobox(
+            fmt_frame,
+            textvariable=self.plot_font_family,
+            values=["Segoe UI", "Times New Roman", "Arial", "Calibri", "Courier New", "DejaVu Sans"],
+            state="readonly",
+            width=14
+        )
+        font_combo.grid(row=0, column=1, padx=2, pady=2, sticky="w")
+        
+        ttk.Label(fmt_frame, text="Size:").grid(row=0, column=2, padx=4, pady=2, sticky="e")
+        size_combo = ttk.Combobox(
+            fmt_frame,
+            textvariable=self.plot_font_size,
+            values=["8", "9", "10", "11", "12", "14", "16", "18"],
+            state="readonly",
+            width=4
+        )
+        size_combo.grid(row=0, column=3, padx=2, pady=2, sticky="w")
+        
+        # Row 1: Palette
+        ttk.Label(fmt_frame, text="Palette:").grid(row=1, column=0, padx=2, pady=2, sticky="e")
+        palette_combo = ttk.Combobox(
+            fmt_frame,
+            textvariable=self.plot_color_palette,
+            values=["Default", "Viridis", "Plasma", "Coolwarm", "Grayscale", "Set2"],
+            state="readonly",
+            width=14
+        )
+        palette_combo.grid(row=1, column=1, padx=2, pady=2, sticky="w")
+        
+        # Row 2: Custom Bar Color Highlight
+        ttk.Label(fmt_frame, text="Highlight:").grid(row=2, column=0, padx=2, pady=2, sticky="e")
+        
+        if prefix == "comp":
+            highlight_values = ["None"] + list(MODEL_BUILDERS.keys())
+            h_var = self.comp_highlight_model_var
+            c_var = self.comp_highlight_color_var
+        else:
+            highlight_values = ["None"] + ["80-20", "70-30", "60-40", "50-50"]
+            h_var = self.ratio_highlight_ratio_var
+            c_var = self.ratio_highlight_color_var
+            
+        highlight_combo = ttk.Combobox(
+            fmt_frame,
+            textvariable=h_var,
+            values=highlight_values,
+            state="readonly",
+            width=14
+        )
+        highlight_combo.grid(row=2, column=1, padx=2, pady=2, sticky="w")
+        if prefix != "comp":
+            self.ratio_highlight_combo = highlight_combo
+        
+        color_choices = ["None", "Red", "Blue", "Green", "Orange", "Purple", "Magenta", "Cyan", "Yellow", "Gold", "Pink"]
+        color_combo = ttk.Combobox(
+            fmt_frame,
+            textvariable=c_var,
+            values=color_choices,
+            state="normal",
+            width=8
+        )
+        color_combo.grid(row=2, column=2, columnspan=2, padx=2, pady=2, sticky="w")
+        
+        apply_btn = ttk.Button(fmt_frame, text="Apply Style", command=apply_command, width=10)
+        apply_btn.grid(row=0, column=4, rowspan=3, padx=(10, 2), pady=2, sticky="ns")
+
+    def _get_metric_color(self, metric_idx, total_metrics=4):
+        palette = self.plot_color_palette.get()
+        if palette == "Default":
+            defaults = ["#3d8ec9", "#f4a259", "#74c476", "#9c89b8"]
+            return defaults[metric_idx % len(defaults)]
+        elif palette == "Grayscale":
+            defaults = ["#333333", "#666666", "#999999", "#cccccc"]
+            return defaults[metric_idx % len(defaults)]
+        
+        cmap_name = palette.lower()
+        try:
+            import matplotlib.colors as mcolors
+            cmap = plt.get_cmap(cmap_name)
+            shades = np.linspace(0.25, 0.85, total_metrics)
+            return mcolors.to_hex(cmap(shades[metric_idx]))
+        except Exception:
+            defaults = ["#3d8ec9", "#f4a259", "#74c476", "#9c89b8"]
+            return defaults[metric_idx % len(defaults)]
 
     def _build_prediction_axis_controls(self, parent):
         for child in parent.winfo_children():
@@ -670,6 +967,95 @@ class ModelWorkbenchGUI:
         except Exception:
             pass
 
+    def _build_prediction_c10_controls(self, parent):
+        for child in parent.winfo_children():
+            child.destroy()
+
+        # Title/Label for section
+        ttk.Label(parent, text="C1-C10 View Options:", style="Subtitle.TLabel").grid(row=0, column=0, columnspan=5, sticky="w", pady=(0, 4))
+
+        # Source selector Combobox
+        ttk.Label(parent, text="Data Source:", style="Info.TLabel").grid(row=1, column=0, columnspan=5, sticky="w", pady=(2, 2))
+        src_combo = ttk.Combobox(parent, textvariable=self.prediction_source_var, values=["Test Dataset", "Top 10 Combinations (C1-C10)"], state="readonly", width=25)
+        src_combo.grid(row=2, column=0, columnspan=5, sticky="w", pady=(0, 6))
+        src_combo.bind("<<ComboboxSelected>>", lambda e: self._on_prediction_source_change())
+
+        # Chart type selector Combobox (Grouped Bar vs Scatter Plot)
+        ttk.Label(parent, text="Chart Type:", style="Info.TLabel").grid(row=3, column=0, columnspan=5, sticky="w", pady=(2, 2))
+        type_combo = ttk.Combobox(parent, textvariable=self.prediction_chart_type_var, values=["Grouped Bar", "Scatter Plot"], state="readonly", width=25)
+        type_combo.grid(row=4, column=0, columnspan=5, sticky="w", pady=(0, 6))
+        type_combo.bind("<<ComboboxSelected>>", lambda e: self._on_prediction_source_change())
+
+        # Sub-frame for holding C1-C10 checkboxes
+        self.c_chk_frame = ttk.Frame(parent)
+        self.c_chk_frame.grid(row=5, column=0, columnspan=5, sticky="w", pady=(4, 0))
+
+        # Frame for quick selection shortcut buttons
+        self.prediction_c_buttons_frame = ttk.Frame(parent)
+        self.prediction_c_buttons_frame.grid(row=6, column=0, columnspan=5, sticky="w", pady=(6, 0))
+        
+        self.prediction_all_btn = ttk.Button(self.prediction_c_buttons_frame, text="Select All", width=10, command=self._select_all_cs)
+        self.prediction_all_btn.pack(side="left", padx=(0, 4))
+        
+        self.prediction_clear_btn = ttk.Button(self.prediction_c_buttons_frame, text="Clear All", width=10, command=self._clear_all_cs)
+        self.prediction_clear_btn.pack(side="left")
+
+        self._populate_c10_checkboxes()
+        self._sync_c10_controls_state()
+
+    def _populate_c10_checkboxes(self):
+        for child in self.c_chk_frame.winfo_children():
+            child.destroy()
+
+        for i in range(1, 11):
+            col = (i - 1) % 5
+            row = (i - 1) // 5
+            name = f"C{i}"
+            chk = tk.Checkbutton(
+                self.c_chk_frame,
+                text=name,
+                variable=self.prediction_c_vars[name],
+                command=self._on_c_toggle,
+                relief="flat",
+                anchor="w"
+            )
+            chk.grid(row=row, column=col, sticky="w", padx=(0, 6), pady=1)
+
+    def _sync_c10_controls_state(self):
+        mode = self.prediction_source_var.get()
+        state = "normal" if mode == "Top 10 Combinations (C1-C10)" else "disabled"
+
+        # Enable/disable all checkboxes
+        for child in self.c_chk_frame.winfo_children():
+            try:
+                child.configure(state=state)
+            except Exception:
+                pass
+
+        # Enable/disable shortcut buttons
+        try:
+            self.prediction_all_btn.configure(state=state)
+            self.prediction_clear_btn.configure(state=state)
+        except Exception:
+            pass
+
+    def _on_prediction_source_change(self):
+        self._sync_c10_controls_state()
+        self._update_prediction_chart()
+
+    def _on_c_toggle(self):
+        self._update_prediction_chart()
+
+    def _select_all_cs(self):
+        for var in self.prediction_c_vars.values():
+            var.set(True)
+        self._update_prediction_chart()
+
+    def _clear_all_cs(self):
+        for var in self.prediction_c_vars.values():
+            var.set(False)
+        self._update_prediction_chart()
+
     def _create_view_checkboxes(self, parent, view_vars, callback):
         for child in parent.winfo_children():
             child.destroy()
@@ -823,6 +1209,11 @@ class ModelWorkbenchGUI:
         self.target_col_combo.grid(row=4, column=0, columnspan=2, sticky="we", padx=(0, 8))
         self.target_col_combo.bind("<<ComboboxSelected>>", self._on_target_col_change)
 
+        ttk.Label(top, text="Evaluation Dataset", style="Subtitle.TLabel").grid(row=3, column=2, sticky="w", pady=(8, 2))
+        self.evaluation_dataset_combo = ttk.Combobox(top, textvariable=self.evaluation_dataset_var, values=["Full Test Set", "Actual Top 10 Combinations"], state="readonly", width=35)
+        self.evaluation_dataset_combo.grid(row=4, column=2, columnspan=2, sticky="we", padx=(0, 8))
+        self.evaluation_dataset_combo.bind("<<ComboboxSelected>>", self._on_evaluation_dataset_change)
+
         ttk.Label(top, text="Train Ratio (%)", style="Subtitle.TLabel").grid(row=5, column=0, sticky="w", pady=(8, 2))
         train_entry = ttk.Entry(top, textvariable=self.train_ratio_var, width=12)
         train_entry.grid(row=6, column=0, sticky="w")
@@ -918,11 +1309,14 @@ class ModelWorkbenchGUI:
         notebook.add(ratio_tab, text="Ratio Analysis")
         notebook.add(output_tab, text="Output Preview")
 
-        _, dataset_top10_holder, _, dataset_top10_toolbar_holder = self._build_graph_section(
+        _, dataset_top10_holder, self.dataset_top10_filter_frame, dataset_top10_toolbar_holder = self._build_graph_section(
             dataset_top10_tab,
             "Top 10 Best Combinations from Actual Dataset",
             self.open_dataset_top10_fullscreen,
+            filter_below_header=True,
         )
+
+        self._build_formatting_controls(self.dataset_top10_filter_frame, "comp", self._update_dataset_top10_chart)
 
         self.dataset_top10_fig = Figure(figsize=(9, 6), dpi=100)
         self.dataset_top10_canvas = FigureCanvasTkAgg(self.dataset_top10_fig, master=dataset_top10_holder)
@@ -934,6 +1328,7 @@ class ModelWorkbenchGUI:
             charts_tab,
             "Model Performance Comparison",
             self.open_metrics_fullscreen,
+            filter_below_header=True,
         )
 
         self._build_comparison_mode_controls(self.comparison_filter_frame)
@@ -948,18 +1343,23 @@ class ModelWorkbenchGUI:
             predictions_tab,
             "Prediction Charts",
             self.open_predictions_fullscreen,
+            filter_below_header=True,
         )
 
         # create dedicated sub-frames inside prediction_filter_frame so
-        # axis controls and view checkboxes don't clobber each other
+        # axis controls, view checkboxes, and C1-C10 filters don't clobber each other
         self.prediction_axis_holder = ttk.Frame(self.prediction_filter_frame)
         self.prediction_view_holder = ttk.Frame(self.prediction_filter_frame)
+        self.prediction_c10_holder = ttk.Frame(self.prediction_filter_frame)
+        self.prediction_formatting_holder = ttk.Frame(self.prediction_filter_frame)
 
-        # Use grid so the axis controls and view checkboxes share space responsively
-        self.prediction_axis_holder.grid(row=0, column=0, sticky="nw")
-        self.prediction_view_holder.grid(row=0, column=1, sticky="nw", padx=(12, 0))
+        # Use a clean 2x2 grid layout to distribute space evenly without horizontal clobbering
+        self.prediction_axis_holder.grid(row=0, column=0, sticky="nw", padx=(0, 16), pady=(0, 12))
+        self.prediction_view_holder.grid(row=0, column=1, sticky="nw", padx=(0, 0), pady=(0, 12))
+        self.prediction_c10_holder.grid(row=1, column=0, sticky="nw", padx=(0, 16), pady=(0, 0))
+        self.prediction_formatting_holder.grid(row=1, column=1, sticky="nw", padx=(0, 0), pady=(0, 0))
         try:
-            self.prediction_filter_frame.grid_columnconfigure(0, weight=0)
+            self.prediction_filter_frame.grid_columnconfigure(0, weight=1)
             self.prediction_filter_frame.grid_columnconfigure(1, weight=1)
         except Exception:
             pass
@@ -967,6 +1367,10 @@ class ModelWorkbenchGUI:
         self._build_prediction_axis_controls(self.prediction_axis_holder)
         # populate view checkboxes into the dedicated view holder
         self._create_view_checkboxes(self.prediction_view_holder, self.prediction_view_vars, self._on_prediction_view_change)
+        # build prediction C1-C10 controls into the dedicated C1-C10 holder
+        self._build_prediction_c10_controls(self.prediction_c10_holder)
+        # build plot formatting controls for prediction tab
+        self._build_formatting_controls(self.prediction_formatting_holder, "comp", self._update_prediction_chart)
 
         # bind live-update traces for axis inputs (debounced)
         try:
@@ -985,7 +1389,17 @@ class ModelWorkbenchGUI:
             combinations_tab,
             "Top 10 Best Combinations by Model",
             self.open_combinations_fullscreen,
+            filter_below_header=True,
         )
+
+        # Create sub-frames inside combination_filter_frame to separate view checkboxes from global formatting controls
+        self.combination_checkbox_holder = ttk.Frame(self.combination_filter_frame)
+        self.combination_checkbox_holder.pack(side="left", fill="y", anchor="w")
+        self.combination_formatting_holder = ttk.Frame(self.combination_filter_frame)
+        self.combination_formatting_holder.pack(side="left", fill="y", anchor="w", padx=(16, 0))
+
+        # Build plot formatting controls for combinations tab
+        self._build_formatting_controls(self.combination_formatting_holder, "comp", self._update_combination_chart)
 
         self.combo_fig = Figure(figsize=(9, 6), dpi=100)
         self.combo_canvas = FigureCanvasTkAgg(self.combo_fig, master=combinations_holder)
@@ -1025,6 +1439,7 @@ class ModelWorkbenchGUI:
             ratio_tab,
             "Model Performance vs Train-Test Ratio",
             self.open_ratio_fullscreen,
+            filter_below_header=True,
         )
 
         self._build_ratio_mode_controls(ratio_filter_frame)
@@ -1123,9 +1538,9 @@ class ModelWorkbenchGUI:
                 self._on_prediction_view_change,
             )
 
-        if self.combination_filter_frame is not None:
+        if getattr(self, "combination_checkbox_holder", None) is not None:
             self._create_view_checkboxes(
-                self.combination_filter_frame,
+                self.combination_checkbox_holder,
                 self.combination_view_vars,
                 self._on_combination_view_change,
             )
@@ -1146,6 +1561,31 @@ class ModelWorkbenchGUI:
                 self.status_text.set(f"Dataset Top 10 updated for: {self.target_col_var.get()}")
         except Exception as exc:
             self.status_text.set(f"Error updating target column: {str(exc)}")
+
+    def _on_evaluation_dataset_change(self, _event=None):
+        if self.metrics_df.empty:
+            return
+
+        source = self.evaluation_dataset_var.get()
+        if source == "Actual Top 10 Combinations":
+            if not hasattr(self, "metrics_c10_df") or self.metrics_c10_df.empty:
+                return
+            self.metrics_df = self.metrics_c10_df.copy()
+        else:
+            if not hasattr(self, "metrics_test_df") or self.metrics_test_df.empty:
+                return
+            self.metrics_df = self.metrics_test_df.copy()
+
+        # Update results and charts
+        self._update_results_table()
+        self._update_metric_charts()
+        self._update_prediction_chart()
+        self._update_combination_chart()
+        try:
+            df = self._load_dataset(self.dataset_path.get())
+            self._update_output_preview(df)
+        except Exception:
+            pass
 
     def _on_combination_view_change(self, _event=None):
         self._update_combination_chart()
@@ -1207,59 +1647,147 @@ class ModelWorkbenchGUI:
             self._render_model_comparison_figure_3d(figure, models, r2_vals, rmse_vals, mse_vals, mae_vals, best_idx, best_row)
             return
 
-        # 2D grouped-column comparison chart (image-2 style)
+        # 2D separate subplots in a 2x2 grid
+        outer = figure.add_gridspec(2, 1, height_ratios=[4.9, 1.3], hspace=0.28)
+        top = outer[0].subgridspec(2, 2, wspace=0.28, hspace=0.36)
+        ax1 = figure.add_subplot(top[0, 0])
+        ax2 = figure.add_subplot(top[0, 1])
+        ax3 = figure.add_subplot(top[1, 0])
+        ax4 = figure.add_subplot(top[1, 1])
+        info_ax = figure.add_subplot(outer[1, 0])
+        info_ax.set_facecolor("#f6f6f6")
+        info_ax.set_xticks([])
+        info_ax.set_yticks([])
+        for spine in info_ax.spines.values():
+            spine.set_visible(True)
+            spine.set_edgecolor("#666666")
+            spine.set_linewidth(0.9)
+
         wrapped_models = [self._format_model_axis_label(m) for m in models]
         x = np.arange(len(models), dtype=float)
-        width = 0.18
-        offsets = {
-            "R2": -1.5 * width,
-            "RMSE": -0.5 * width,
-            "MSE": 0.5 * width,
-            "MAE": 1.5 * width,
-        }
+        width = 0.45
 
-        ax = figure.add_subplot(111)
-        bars_r2 = ax.bar(x + offsets["R2"], r2_vals, width=width, color="#3d8ec9", edgecolor="#2b2b2b", linewidth=0.25, label="R2")
-        bars_rmse = ax.bar(x + offsets["RMSE"], rmse_vals, width=width, color="#f4a259", edgecolor="#2b2b2b", linewidth=0.25, label="RMSE")
-        bars_mse = ax.bar(x + offsets["MSE"], mse_vals, width=width, color="#74c476", edgecolor="#2b2b2b", linewidth=0.25, label="MSE")
-        bars_mae = ax.bar(x + offsets["MAE"], mae_vals, width=width, color="#9c89b8", edgecolor="#2b2b2b", linewidth=0.25, label="MAE")
+        font_family = self.plot_font_family.get()
+        font_size = float(self.plot_font_size.get()) if self.plot_font_size.get() else 10.0
+        
+        comp_highlight_model = self.comp_highlight_model_var.get()
+        comp_highlight_color = self.comp_highlight_color_var.get().lower()
 
-        # Add value labels
-        self._annotate_vertical_bars(ax, bars_r2)
-        self._annotate_vertical_bars(ax, bars_rmse)
-        self._annotate_vertical_bars(ax, bars_mse)
-        self._annotate_vertical_bars(ax, bars_mae)
+        # Generate colors for bars based on highlight
+        colors_r2 = []
+        for m in models:
+            if comp_highlight_model != "None" and m == comp_highlight_model and comp_highlight_color != "none":
+                colors_r2.append(comp_highlight_color)
+            else:
+                colors_r2.append(self._get_metric_color(0))
 
+        colors_rmse = []
+        for m in models:
+            if comp_highlight_model != "None" and m == comp_highlight_model and comp_highlight_color != "none":
+                colors_rmse.append(comp_highlight_color)
+            else:
+                colors_rmse.append(self._get_metric_color(1))
+
+        colors_mse = []
+        for m in models:
+            if comp_highlight_model != "None" and m == comp_highlight_model and comp_highlight_color != "none":
+                colors_mse.append(comp_highlight_color)
+            else:
+                colors_mse.append(self._get_metric_color(2))
+
+        colors_mae = []
+        for m in models:
+            if comp_highlight_model != "None" and m == comp_highlight_model and comp_highlight_color != "none":
+                colors_mae.append(comp_highlight_color)
+            else:
+                colors_mae.append(self._get_metric_color(3))
+
+        # Subplot 1: R2
+        bars_r2 = ax1.bar(x, r2_vals, width=width, color=colors_r2, edgecolor="#2b2b2b", linewidth=0.25)
+        self._annotate_vertical_bars(ax1, bars_r2, fontsize=font_size - 2)
         for model_name, value, bar in zip(models, r2_vals, bars_r2):
             self._set_hover_data(bar, text=f"Model: {model_name}\nR2: {value:.6f}")
+        ax1.set_title("R² Score Comparison", fontweight="bold", fontsize=font_size + 1, family=font_family)
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(wrapped_models, fontsize=font_size - 1, family=font_family)
+        ax1.tick_params(axis="y", labelsize=font_size - 1)
+        ax1.grid(axis="y", linestyle="--", alpha=0.22)
+
+        # Subplot 2: RMSE
+        bars_rmse = ax2.bar(x, rmse_vals, width=width, color=colors_rmse, edgecolor="#2b2b2b", linewidth=0.25)
+        self._annotate_vertical_bars(ax2, bars_rmse, fontsize=font_size - 2)
         for model_name, value, bar in zip(models, rmse_vals, bars_rmse):
             self._set_hover_data(bar, text=f"Model: {model_name}\nRMSE: {value:.6f}")
+        ax2.set_title("RMSE Comparison", fontweight="bold", fontsize=font_size + 1, family=font_family)
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(wrapped_models, fontsize=font_size - 1, family=font_family)
+        ax2.tick_params(axis="y", labelsize=font_size - 1)
+        ax2.grid(axis="y", linestyle="--", alpha=0.22)
+
+        # Subplot 3: MSE
+        bars_mse = ax3.bar(x, mse_vals, width=width, color=colors_mse, edgecolor="#2b2b2b", linewidth=0.25)
+        self._annotate_vertical_bars(ax3, bars_mse, fontsize=font_size - 2)
         for model_name, value, bar in zip(models, mse_vals, bars_mse):
             self._set_hover_data(bar, text=f"Model: {model_name}\nMSE: {value:.6f}")
+        ax3.set_title("MSE Comparison", fontweight="bold", fontsize=font_size + 1, family=font_family)
+        ax3.set_xticks(x)
+        ax3.set_xticklabels(wrapped_models, fontsize=font_size - 1, family=font_family)
+        ax3.tick_params(axis="y", labelsize=font_size - 1)
+        ax3.grid(axis="y", linestyle="--", alpha=0.22)
+
+        # Subplot 4: MAE
+        bars_mae = ax4.bar(x, mae_vals, width=width, color=colors_mae, edgecolor="#2b2b2b", linewidth=0.25)
+        self._annotate_vertical_bars(ax4, bars_mae, fontsize=font_size - 2)
         for model_name, value, bar in zip(models, mae_vals, bars_mae):
             self._set_hover_data(bar, text=f"Model: {model_name}\nMAE: {value:.6f}")
+        ax4.set_title("MAE Comparison", fontweight="bold", fontsize=font_size + 1, family=font_family)
+        ax4.set_xticks(x)
+        ax4.set_xticklabels(wrapped_models, fontsize=font_size - 1, family=font_family)
+        ax4.tick_params(axis="y", labelsize=font_size - 1)
+        ax4.grid(axis="y", linestyle="--", alpha=0.22)
 
-        # best model highlight removed for research suitability
+        # Apply axis limits for 2D subplots
+        r2_xmin = self._parse_axis_limit(self.comp_r2_xmin_var.get())
+        r2_xmax = self._parse_axis_limit(self.comp_r2_xmax_var.get())
+        r2_ymin = self._parse_axis_limit(self.comp_r2_ymin_var.get())
+        r2_ymax = self._parse_axis_limit(self.comp_r2_ymax_var.get())
+        if r2_xmin is not None and r2_xmax is not None and r2_xmin < r2_xmax:
+            ax1.set_xlim(r2_xmin, r2_xmax)
+        if r2_ymin is not None and r2_ymax is not None and r2_ymin < r2_ymax:
+            ax1.set_ylim(r2_ymin, r2_ymax)
 
-        all_vals = np.concatenate([r2_vals, rmse_vals, mse_vals, mae_vals])
-        y_top = max(1.0, float(np.max(all_vals)) * 1.35)
-        ax.set_ylim(0.0, y_top)
-        ax.set_xlim(-0.6, len(models) - 0.4)
-        ax.set_xticks(x)
-        ax.set_xticklabels(wrapped_models, fontsize=9)
-        ax.set_title(
-            f"Model Metrics Comparison (Grouped) | Best: {best_row['Model']}",
-            fontweight="bold",
-            fontsize=12,
-        )
-        ax.set_xlabel("Models", fontweight="bold")
-        ax.set_ylabel("Metric Value", fontweight="bold")
-        ax.grid(axis="y", linestyle="--", alpha=0.22)
-        ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), ncol=1, fontsize=8)
+        rmse_xmin = self._parse_axis_limit(self.comp_rmse_xmin_var.get())
+        rmse_xmax = self._parse_axis_limit(self.comp_rmse_xmax_var.get())
+        rmse_ymin = self._parse_axis_limit(self.comp_rmse_ymin_var.get())
+        rmse_ymax = self._parse_axis_limit(self.comp_rmse_ymax_var.get())
+        if rmse_xmin is not None and rmse_xmax is not None and rmse_xmin < rmse_xmax:
+            ax2.set_xlim(rmse_xmin, rmse_xmax)
+        if rmse_ymin is not None and rmse_ymax is not None and rmse_ymin < rmse_ymax:
+            ax2.set_ylim(rmse_ymin, rmse_ymax)
 
-        # Apply tight layout to avoid label clipping
+        mse_xmin = self._parse_axis_limit(self.comp_mse_xmin_var.get())
+        mse_xmax = self._parse_axis_limit(self.comp_mse_xmax_var.get())
+        mse_ymin = self._parse_axis_limit(self.comp_mse_ymin_var.get())
+        mse_ymax = self._parse_axis_limit(self.comp_mse_ymax_var.get())
+        if mse_xmin is not None and mse_xmax is not None and mse_xmin < mse_xmax:
+            ax3.set_xlim(mse_xmin, mse_xmax)
+        if mse_ymin is not None and mse_ymax is not None and mse_ymin < mse_ymax:
+            ax3.set_ylim(mse_ymin, mse_ymax)
+
+        mae_xmin = self._parse_axis_limit(self.comp_mae_xmin_var.get())
+        mae_xmax = self._parse_axis_limit(self.comp_mae_xmax_var.get())
+        mae_ymin = self._parse_axis_limit(self.comp_mae_ymin_var.get())
+        mae_ymax = self._parse_axis_limit(self.comp_mae_ymax_var.get())
+        if mae_xmin is not None and mae_xmax is not None and mae_xmin < mae_xmax:
+            ax4.set_xlim(mae_xmin, mae_xmax)
+        if mae_ymin is not None and mae_ymax is not None and mae_ymin < mae_ymax:
+            ax4.set_ylim(mae_ymin, mae_ymax)
+
+        self._draw_model_reference_box(info_ax, models, r2_vals * 100.0, rmse_vals, mse_vals, mae_vals)
+        figure.subplots_adjust(left=0.05, right=0.98, top=0.93, bottom=0.06)
+
         try:
-            figure.tight_layout(rect=[0, 0, 0.85, 1])
+            figure.tight_layout()
         except Exception:
             pass
 
@@ -1280,6 +1808,63 @@ class ModelWorkbenchGUI:
             spine.set_edgecolor("#666666")
             spine.set_linewidth(0.9)
 
+        # Parse axis limits for 3D plots
+        r2_xmin = self._parse_axis_limit(self.comp_r2_xmin_var.get())
+        r2_xmax = self._parse_axis_limit(self.comp_r2_xmax_var.get())
+        r2_ymin = self._parse_axis_limit(self.comp_r2_ymin_var.get())
+        r2_ymax = self._parse_axis_limit(self.comp_r2_ymax_var.get())
+        if r2_ymin is not None and r2_ymax is not None:
+            r2_ymin_3d, r2_ymax_3d = (r2_ymin * 100.0, r2_ymax * 100.0) if r2_ymax <= 1.0 else (r2_ymin, r2_ymax)
+        else:
+            r2_ymin_3d, r2_ymax_3d = None, None
+
+        rmse_xmin = self._parse_axis_limit(self.comp_rmse_xmin_var.get())
+        rmse_xmax = self._parse_axis_limit(self.comp_rmse_xmax_var.get())
+        rmse_ymin = self._parse_axis_limit(self.comp_rmse_ymin_var.get())
+        rmse_ymax = self._parse_axis_limit(self.comp_rmse_ymax_var.get())
+
+        mse_xmin = self._parse_axis_limit(self.comp_mse_xmin_var.get())
+        mse_xmax = self._parse_axis_limit(self.comp_mse_xmax_var.get())
+        mse_ymin = self._parse_axis_limit(self.comp_mse_ymin_var.get())
+        mse_ymax = self._parse_axis_limit(self.comp_mse_ymax_var.get())
+
+        mae_xmin = self._parse_axis_limit(self.comp_mae_xmin_var.get())
+        mae_xmax = self._parse_axis_limit(self.comp_mae_xmax_var.get())
+        mae_ymin = self._parse_axis_limit(self.comp_mae_ymin_var.get())
+        mae_ymax = self._parse_axis_limit(self.comp_mae_ymax_var.get())
+
+        comp_highlight_model = self.comp_highlight_model_var.get()
+        comp_highlight_color = self.comp_highlight_color_var.get().lower()
+
+        # Custom highlight lists for 3D bars
+        colors_r2 = []
+        for m in models:
+            if comp_highlight_model != "None" and m == comp_highlight_model and comp_highlight_color != "none":
+                colors_r2.append(comp_highlight_color)
+            else:
+                colors_r2.append(self._get_metric_color(0))
+
+        colors_rmse = []
+        for m in models:
+            if comp_highlight_model != "None" and m == comp_highlight_model and comp_highlight_color != "none":
+                colors_rmse.append(comp_highlight_color)
+            else:
+                colors_rmse.append(self._get_metric_color(1))
+
+        colors_mse = []
+        for m in models:
+            if comp_highlight_model != "None" and m == comp_highlight_model and comp_highlight_color != "none":
+                colors_mse.append(comp_highlight_color)
+            else:
+                colors_mse.append(self._get_metric_color(2))
+
+        colors_mae = []
+        for m in models:
+            if comp_highlight_model != "None" and m == comp_highlight_model and comp_highlight_color != "none":
+                colors_mae.append(comp_highlight_color)
+            else:
+                colors_mae.append(self._get_metric_color(3))
+
         self._plot_3d_metric_bars(
             ax1,
             models,
@@ -1288,6 +1873,11 @@ class ModelWorkbenchGUI:
             "Blues",
             f"Model Accuracy Comparison (3D)\n{best_row['Model']}: {best_row['R2'] * 100:.2f}%",
             "R² Score (%)",
+            xmin=r2_xmin,
+            xmax=r2_xmax,
+            zmin=r2_ymin_3d,
+            zmax=r2_ymax_3d,
+            custom_colors=colors_r2,
         )
 
         self._plot_3d_metric_bars(
@@ -1298,6 +1888,11 @@ class ModelWorkbenchGUI:
             "Oranges",
             "RMSE Comparison (3D)",
             "RMSE",
+            xmin=rmse_xmin,
+            xmax=rmse_xmax,
+            zmin=rmse_ymin,
+            zmax=rmse_ymax,
+            custom_colors=colors_rmse,
         )
 
         self._plot_3d_metric_bars(
@@ -1308,6 +1903,11 @@ class ModelWorkbenchGUI:
             "Greens",
             "MSE Comparison (3D)",
             "MSE",
+            xmin=mse_xmin,
+            xmax=mse_xmax,
+            zmin=mse_ymin,
+            zmax=mse_ymax,
+            custom_colors=colors_mse,
         )
 
         self._plot_3d_metric_bars(
@@ -1318,6 +1918,11 @@ class ModelWorkbenchGUI:
             "Purples",
             "MAE Comparison (3D)",
             "MAE",
+            xmin=mae_xmin,
+            xmax=mae_xmax,
+            zmin=mae_ymin,
+            zmax=mae_ymax,
+            custom_colors=colors_mae,
         )
 
         self._draw_model_reference_box(info_ax, models, r2_vals * 100.0, rmse_vals, mse_vals, mae_vals)
@@ -1329,6 +1934,9 @@ class ModelWorkbenchGUI:
             pass
 
     def _draw_model_reference_box(self, ax, models, r2_values, rmse_values, mse_values, mae_values):
+        font_family = self.plot_font_family.get()
+        font_size = float(self.plot_font_size.get()) if self.plot_font_size.get() else 10.0
+
         items = []
         for idx, (name, r2_value, rmse_value, mse_value, mae_value) in enumerate(zip(models, r2_values, rmse_values, mse_values, mae_values), 1):
             items.append(f"{idx}. {name} | R2={r2_value:.2f}% | RMSE={rmse_value:.6f} | MSE={mse_value:.6f} | MAE={mae_value:.6f}")
@@ -1344,8 +1952,9 @@ class ModelWorkbenchGUI:
             "Model Reference (1=First, 2=Second, etc.)",
             ha="left",
             va="top",
-            fontsize=10,
+            fontsize=font_size,
             fontweight="bold",
+            family=font_family,
             color="#222222",
             transform=ax.transAxes,
         )
@@ -1357,8 +1966,8 @@ class ModelWorkbenchGUI:
                 "\n".join(column_text),
                 ha="left",
                 va="top",
-                fontsize=7.4,
-                family="monospace",
+                fontsize=font_size - 2.5,
+                family=font_family,
                 color="#111111",
                 transform=ax.transAxes,
                 bbox=dict(boxstyle="round,pad=0.34", facecolor="#ffffff", edgecolor="#bbbbbb", alpha=1.0),
@@ -1381,14 +1990,18 @@ class ModelWorkbenchGUI:
         }
         return short_map.get(name, name)
 
-    def _plot_3d_metric_bars(self, ax, labels, values, highlight_index, cmap_name, title, zlabel):
+    def _plot_3d_metric_bars(self, ax, labels, values, highlight_index, cmap_name, title, zlabel, xmin=None, xmax=None, zmin=None, zmax=None, custom_colors=None):
         # Give labels more room by spreading bars a bit further apart.
         x_positions = np.arange(len(labels), dtype=float) * 1.55
         y_positions = np.zeros(len(labels), dtype=float)
         z_positions = np.zeros(len(labels), dtype=float)
         dx = np.full(len(labels), 0.34, dtype=float)
         dy = np.full(len(labels), 0.50, dtype=float)
-        colors = self._build_metric_bar_colors(len(labels), highlight_index, cmap_name)
+        
+        if custom_colors is not None:
+            colors = custom_colors
+        else:
+            colors = self._build_metric_bar_colors(len(labels), highlight_index, cmap_name)
 
         ax.bar3d(x_positions, y_positions, z_positions, dx, dy, values, color=colors, edgecolor="#2b2b2b", linewidth=0.25)
         # invisible points used for hover on 3D bars
@@ -1398,15 +2011,28 @@ class ModelWorkbenchGUI:
             self._set_hover_data(hover_scatter, texts=hover_texts)
         except Exception:
             pass
-        ax.set_title(title, fontweight="bold", fontsize=12, pad=14)
-        ax.set_xlabel("Models", labelpad=14, fontweight="bold")
+
+        font_family = self.plot_font_family.get()
+        font_size = float(self.plot_font_size.get()) if self.plot_font_size.get() else 10.0
+
+        ax.set_title(title, fontweight="bold", fontsize=font_size + 1, pad=14, family=font_family)
+        is_ratio_plot = "ratio" in title.lower() or "ratio" in zlabel.lower()
+        xlabel = "Ratios" if is_ratio_plot else "Models"
+        ax.set_xlabel(xlabel, labelpad=14, fontweight="bold", fontsize=font_size, family=font_family)
         ax.set_ylabel("")
         ax.set_yticks([])
-        ax.set_zlabel(zlabel, labelpad=8)
+        ax.set_zlabel(zlabel, labelpad=8, fontsize=font_size, family=font_family)
         ax.set_xticks(x_positions + dx / 2)
-        numeric_labels = [str(i + 1) for i in range(len(labels))]
-        ax.set_xticklabels(numeric_labels, rotation=0, ha="center", fontsize=10, fontweight="bold")
-        ax.tick_params(axis="x", pad=1)
+        
+        if is_ratio_plot:
+            ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=font_size - 1, fontweight="bold", family=font_family)
+        else:
+            numeric_labels = [str(i + 1) for i in range(len(labels))]
+            ax.set_xticklabels(numeric_labels, rotation=0, ha="center", fontsize=font_size - 1, fontweight="bold", family=font_family)
+            
+        ax.tick_params(axis="x", pad=1, labelsize=font_size - 1)
+        ax.tick_params(axis="z", pad=1, labelsize=font_size - 1)
+        
         try:
             ax.set_box_aspect((3.5, 1.0, 1.25))
         except Exception:
@@ -1417,10 +2043,269 @@ class ModelWorkbenchGUI:
         except Exception:
             pass
 
-        max_value = float(np.max(values)) if len(values) else 1.0
-        ax.set_zlim(0, max(max_value * 1.15, 1.0))
+        if xmin is not None and xmax is not None and xmin < xmax:
+            ax.set_xlim(xmin, xmax)
+        if zmin is not None and zmax is not None and zmin < zmax:
+            ax.set_zlim(zmin, zmax)
+        else:
+            max_value = float(np.max(values)) if len(values) else 1.0
+            ax.set_zlim(0, max(max_value * 1.15, 1.0))
 
         ax.grid(False)
+
+    def _render_prediction_figure_top10(self, figure, names):
+        if self.dataset_top10 is None:
+            ax = figure.add_subplot(111)
+            ax.text(0.5, 0.5, "Please load a dataset to view Top 10 Combinations", ha="center", va="center", fontsize=12)
+            ax.axis("off")
+            return
+
+        selected_cs = [f"C{i}" for i in range(1, 11) if self.prediction_c_vars[f"C{i}"].get()]
+        if not selected_cs:
+            ax = figure.add_subplot(111)
+            ax.text(0.5, 0.5, "No combinations selected (C1-C10)", ha="center", va="center", fontsize=12)
+            ax.axis("off")
+            return
+
+        selected_indices = [i - 1 for i in range(1, 11) if self.prediction_c_vars[f"C{i}"].get()]
+        sub_df = self.dataset_top10.iloc[selected_indices]
+
+        # Load dataset features and target to ensure we match correct columns
+        try:
+            df = self._load_dataset(self.dataset_path.get())
+            _, _, _, feature_cols = self._get_features_and_target(df)
+        except Exception:
+            feature_cols = [c for c in sub_df.columns if c not in ("Combination", "Actual")]
+
+        is_band = getattr(self, "dataset_band_col", None) is not None
+        if is_band:
+            actuals = sub_df["Actual"].to_numpy(dtype=float)
+        else:
+            X_c = sub_df[feature_cols]
+            actuals = sub_df["Actual"].to_numpy(dtype=float)
+
+        n = len(names)
+        cols = 1 if n == 1 else 2
+        rows = int(math.ceil(n / cols))
+
+        chart_type = self.prediction_chart_type_var.get()
+        x_unit = self.prediction_xunit_var.get().strip() or self._infer_prediction_units_from_target(self.dataset_target_col)
+        y_unit = self.prediction_yunit_var.get().strip() or self._infer_prediction_units_from_target(self.dataset_target_col)
+        x_unit_suffix = f" ({x_unit})" if x_unit else ""
+        y_unit_suffix = f" ({y_unit})" if y_unit else ""
+
+        font_family = self.plot_font_family.get()
+        font_size = float(self.plot_font_size.get()) if self.plot_font_size.get() else 10.0
+        palette = self.plot_color_palette.get()
+
+        actual_color = self._get_metric_color(1)
+        predicted_color = self._get_metric_color(0)
+
+        cmap_mapped = "viridis"
+        if palette == "Grayscale":
+            cmap_mapped = "gray"
+        elif palette in ("Viridis", "Plasma", "Coolwarm"):
+            cmap_mapped = palette.lower()
+        elif palette == "Set2":
+            cmap_mapped = "Accent"
+
+        for idx, name in enumerate(names, start=1):
+            ax = figure.add_subplot(rows, cols, idx)
+            pipeline = self.trained_models[name]
+            
+            if is_band:
+                band_col = self.dataset_band_col
+                band_values = self.dataset_band_values
+                design_cols = self.dataset_design_cols
+                preds_list = []
+                for _, row in sub_df.iterrows():
+                    temp_dict = {col: row[col] for col in design_cols}
+                    temp_df = pd.DataFrame([temp_dict] * len(band_values))
+                    temp_df[band_col] = band_values
+                    temp_df = temp_df[feature_cols]
+                    row_preds = pipeline.predict(temp_df)
+                    preds_list.append(np.mean(row_preds))
+                preds = np.array(preds_list)
+            else:
+                preds = pipeline.predict(X_c)
+
+            # Calculate regression metrics specifically for the selected C1-C10 combinations
+            try:
+                metrics_subset = self._compute_regression_metrics(actuals, preds)
+                r2_val = metrics_subset["R2"]
+                rmse_val = metrics_subset["RMSE"]
+                mse_val = metrics_subset["MSE"]
+                mae_val = metrics_subset["MAE"]
+            except Exception:
+                r2_val = rmse_val = mse_val = mae_val = 0.0
+
+            if chart_type == "Grouped Bar":
+                x = np.arange(len(selected_indices), dtype=float)
+                width = 0.35
+
+                rects1 = ax.bar(x - width/2, actuals, width, label='Actual', color=actual_color, edgecolor='none')
+                rects2 = ax.bar(x + width/2, preds, width, label='Predicted', color=predicted_color, edgecolor='none')
+
+                # Tooltips for Actual Bars
+                for rect, original_idx, val in zip(rects1, selected_indices, actuals):
+                    row = self.dataset_top10.iloc[original_idx]
+                    disp_cols = self.dataset_design_cols if is_band else feature_cols
+                    details = [f"{col}: {self._format_feature_value(row[col])}" for col in disp_cols]
+                    tooltip = f"Rank: C{original_idx+1}\nActual: {val:.6f}\n" + "\n".join(details)
+                    self._set_hover_data(rect, text=tooltip)
+
+                # Tooltips for Predicted Bars
+                for rect, original_idx, val in zip(rects2, selected_indices, preds):
+                    row = self.dataset_top10.iloc[original_idx]
+                    disp_cols = self.dataset_design_cols if is_band else feature_cols
+                    details = [f"{col}: {self._format_feature_value(row[col])}" for col in disp_cols]
+                    tooltip = f"Rank: C{original_idx+1}\nPredicted: {val:.6f}\n" + "\n".join(details)
+                    self._set_hover_data(rect, text=tooltip)
+
+                # Label the bars
+                self._annotate_vertical_bars(ax, rects1, fmt="{:.4f}", fontsize=font_size - 2)
+                self._annotate_vertical_bars(ax, rects2, fmt="{:.4f}", fontsize=font_size - 2)
+
+                ax.set_xticks(x)
+                ax.set_xticklabels([f"C{i+1}" for i in selected_indices], fontsize=font_size - 1, family=font_family)
+                ax.set_xlabel("Combinations", fontsize=font_size, family=font_family)
+                ax.set_ylabel(f"Value{y_unit_suffix}", fontsize=font_size, family=font_family)
+                ax.set_title(f"{name} - Top Combinations (Bar Chart)", fontweight="bold", fontsize=font_size + 1, family=font_family)
+                
+                leg = ax.legend(loc="upper right", framealpha=0.9)
+                try:
+                    for text in leg.get_texts():
+                        text.set_family(font_family)
+                        text.set_fontsize(font_size - 2)
+                except Exception:
+                    pass
+                ax.grid(axis="y", linestyle="--", alpha=0.25)
+                ax.tick_params(axis="y", labelsize=font_size - 1)
+
+                # Add subset metrics overlay box
+                box_text = (
+                    f"Selected C1-C10 Metrics:\n"
+                    f"R² = {r2_val:.4f}\n"
+                    f"RMSE = {rmse_val:.4f}\n"
+                    f"MSE = {mse_val:.4f}\n"
+                    f"MAE = {mae_val:.4f}"
+                )
+                ax.text(
+                    0.03,
+                    0.86,
+                    box_text,
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=font_size - 1.7,
+                    family=font_family,
+                    color="#222222",
+                    bbox=dict(boxstyle="round,pad=0.22", facecolor="white", edgecolor="#bbbbbb", alpha=0.85),
+                )
+
+                all_vals = np.concatenate([actuals, preds])
+                ymax = float(np.max(all_vals)) if len(all_vals) else 1.0
+                ymin = min(0.0, float(np.min(all_vals)))
+                ax.set_ylim(ymin, ymax * 1.25)
+
+            else:
+                # Scatter Plot
+                residual_magnitude = np.abs(actuals - preds)
+                scatter = ax.scatter(
+                    actuals,
+                    preds,
+                    s=60,
+                    alpha=0.9,
+                    c=residual_magnitude,
+                    cmap=cmap_mapped,
+                    edgecolors="white",
+                    linewidths=0.5,
+                )
+
+                all_vals = np.concatenate([actuals, preds])
+                diag_low = float(np.min(all_vals)) * 0.95 if len(all_vals) else 0.0
+                diag_high = float(np.max(all_vals)) * 1.05 if len(all_vals) else 1.0
+                ax.plot([diag_low, diag_high], [diag_low, diag_high], "r--", linewidth=1.2)
+
+                # Labels for scatter points
+                for i, original_idx in enumerate(selected_indices):
+                    ax.annotate(
+                        f"C{original_idx+1}",
+                        (actuals[i], preds[i]),
+                        xytext=(5, 5),
+                        textcoords="offset points",
+                        fontsize=font_size - 1,
+                        fontweight="bold",
+                        family=font_family,
+                        bbox=dict(boxstyle="round,pad=0.15", facecolor="white", edgecolor="#cccccc", alpha=0.8)
+                    )
+
+                # Tooltips for scatter points
+                try:
+                    hover_texts = []
+                    disp_cols = self.dataset_design_cols if is_band else feature_cols
+                    for original_idx, actual, pred, res in zip(selected_indices, actuals, preds, residual_magnitude):
+                        row = self.dataset_top10.iloc[original_idx]
+                        details = [f"{col}: {self._format_feature_value(row[col])}" for col in disp_cols]
+                        tooltip = f"Rank: C{original_idx+1}\nActual: {actual:.6f}\nPredicted: {pred:.6f}\nResidual: {res:.6f}\n" + "\n".join(details)
+                        hover_texts.append(tooltip)
+                    self._set_hover_data(scatter, texts=hover_texts)
+                except Exception:
+                    pass
+
+                # Add subset metrics overlay box
+                box_text = (
+                    f"Selected C1-C10 Metrics:\n"
+                    f"R² = {r2_val:.4f}\n"
+                    f"RMSE = {rmse_val:.4f}\n"
+                    f"MSE = {mse_val:.4f}\n"
+                    f"MAE = {mae_val:.4f}"
+                )
+                ax.text(
+                    0.03,
+                    0.86,
+                    box_text,
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=font_size - 1.7,
+                    family=font_family,
+                    color="#222222",
+                    bbox=dict(boxstyle="round,pad=0.22", facecolor="white", edgecolor="#bbbbbb", alpha=0.85),
+                )
+
+                ax.set_xlim(diag_low, diag_high)
+                ax.set_ylim(diag_low, diag_high)
+                ax.set_xlabel(f"Actual{x_unit_suffix}", fontsize=font_size, family=font_family)
+                ax.set_ylabel(f"Predicted{y_unit_suffix}", fontsize=font_size, family=font_family)
+                ax.set_title(f"{name} - Top Combinations (Scatter)", fontweight="bold", fontsize=font_size + 1, family=font_family)
+                
+                cbar = figure.colorbar(scatter, ax=ax, fraction=0.046, pad=0.03)
+                cbar.set_label("|Residual|", fontsize=font_size - 1, family=font_family)
+                cbar.ax.tick_params(labelsize=font_size - 2)
+                try:
+                    for t in cbar.ax.get_yticklabels():
+                        t.set_family(font_family)
+                except Exception:
+                    pass
+                ax.grid(True, linestyle="--", alpha=0.25)
+                ax.tick_params(axis="both", labelsize=font_size - 1)
+
+            subplot_label = chr(96 + idx) if idx <= 26 else str(idx)
+            ax.text(
+                -0.08,
+                1.02,
+                f"({subplot_label})",
+                transform=ax.transAxes,
+                ha="right",
+                va="bottom",
+                fontsize=font_size + 2,
+                fontweight="bold",
+                family=font_family,
+                bbox=dict(boxstyle="round,pad=0.18", facecolor="white", edgecolor="#999999", alpha=0.8),
+            )
+
+        figure.tight_layout()
 
     def _render_prediction_figure(self, figure, empty=False):
         figure.clear()
@@ -1439,6 +2324,10 @@ class ModelWorkbenchGUI:
             ax.axis("off")
             return
 
+        if self.prediction_source_var.get() == "Top 10 Combinations (C1-C10)":
+            self._render_prediction_figure_top10(figure, names)
+            return
+
         n = len(names)
         cols = 1 if n == 1 else 2
         rows = int(math.ceil(n / cols))
@@ -1446,6 +2335,18 @@ class ModelWorkbenchGUI:
         axis_limits = self._get_prediction_axis_limits(frame_list)
         x_unit = self.prediction_xunit_var.get().strip() or self._infer_prediction_units_from_target(self.dataset_target_col or self.target_col_var.get())
         y_unit = self.prediction_yunit_var.get().strip() or self._infer_prediction_units_from_target(self.dataset_target_col or self.target_col_var.get())
+
+        font_family = self.plot_font_family.get()
+        font_size = float(self.plot_font_size.get()) if self.plot_font_size.get() else 10.0
+        palette = self.plot_color_palette.get()
+
+        cmap_mapped = "viridis"
+        if palette == "Grayscale":
+            cmap_mapped = "gray"
+        elif palette in ("Viridis", "Plasma", "Coolwarm"):
+            cmap_mapped = palette.lower()
+        elif palette == "Set2":
+            cmap_mapped = "Accent"
 
         for idx, name in enumerate(names, start=1):
             ax = figure.add_subplot(rows, cols, idx)
@@ -1462,7 +2363,7 @@ class ModelWorkbenchGUI:
                 s=18,
                 alpha=0.9,
                 c=residual_magnitude,
-                cmap="viridis",
+                cmap=cmap_mapped,
                 edgecolors="white",
                 linewidths=0.25,
             )
@@ -1483,7 +2384,7 @@ class ModelWorkbenchGUI:
             ax.set_xlim(x_low, x_high)
             ax.set_ylim(y_low, y_high)
             metric_row = self.metrics_df[self.metrics_df["Model"] == name].iloc[0]
-            ax.set_title(f"{name}", fontweight="bold")
+            ax.set_title(f"{name}", fontweight="bold", fontsize=font_size + 1, family=font_family)
 
             subplot_label = chr(96 + idx) if idx <= 26 else str(idx)
             ax.text(
@@ -1493,15 +2394,17 @@ class ModelWorkbenchGUI:
                 transform=ax.transAxes,
                 ha="right",
                 va="bottom",
-                fontsize=12,
+                fontsize=font_size + 2,
                 fontweight="bold",
+                family=font_family,
                 bbox=dict(boxstyle="round,pad=0.18", facecolor="white", edgecolor="#999999", alpha=0.8),
             )
 
             x_unit_suffix = f" ({x_unit})" if x_unit else ""
             y_unit_suffix = f" ({y_unit})" if y_unit else ""
-            ax.set_xlabel(f"Actual{x_unit_suffix}")
-            ax.set_ylabel(f"Predicted{y_unit_suffix}")
+            ax.set_xlabel(f"Actual{x_unit_suffix}", fontsize=font_size, family=font_family)
+            ax.set_ylabel(f"Predicted{y_unit_suffix}", fontsize=font_size, family=font_family)
+            ax.tick_params(axis="both", labelsize=font_size - 1)
 
             box_text = (
                 f"X [{x_low:.4f}, {x_high:.4f}]{x_unit_suffix}\n"
@@ -1518,13 +2421,21 @@ class ModelWorkbenchGUI:
                 transform=ax.transAxes,
                 ha="left",
                 va="top",
-                fontsize=8.3,
+                fontsize=font_size - 1.7,
+                family=font_family,
                 color="#222222",
                 bbox=dict(boxstyle="round,pad=0.22", facecolor="white", edgecolor="#bbbbbb", alpha=0.85),
             )
 
             # colorbar for residual magnitude (auto-scaled)
-            figure.colorbar(scatter, ax=ax, fraction=0.046, pad=0.03, label="|Residual|")
+            cbar = figure.colorbar(scatter, ax=ax, fraction=0.046, pad=0.03)
+            cbar.set_label("|Residual|", fontsize=font_size - 1, family=font_family)
+            cbar.ax.tick_params(labelsize=font_size - 2)
+            try:
+                for t in cbar.ax.get_yticklabels():
+                    t.set_family(font_family)
+            except Exception:
+                pass
 
         figure.tight_layout()
 
@@ -1589,6 +2500,10 @@ class ModelWorkbenchGUI:
             ax.axis("off")
             return
 
+        font_family = self.plot_font_family.get()
+        font_size = float(self.plot_font_size.get()) if self.plot_font_size.get() else 10.0
+        palette = self.plot_color_palette.get()
+
         if len(model_names) == 1:
             model_name = model_names[0]
             top_df = self.top_combinations[model_name].sort_values("Predicted", ascending=False).reset_index(drop=True)
@@ -1600,18 +2515,29 @@ class ModelWorkbenchGUI:
 
             labels = [f"C{i + 1}" for i in range(len(top_df))]
             values = top_df["Predicted"].to_numpy(dtype=float)
-            colors = plt.get_cmap("viridis")(np.linspace(0.1, 0.9, len(values)))
+            
+            cmap_name = "viridis"
+            if palette == "Grayscale":
+                cmap_name = "gray"
+            elif palette in ("Viridis", "Plasma", "Coolwarm"):
+                cmap_name = palette.lower()
+            elif palette == "Set2":
+                cmap_name = "Accent"
+                
+            colors = plt.get_cmap(cmap_name)(np.linspace(0.1, 0.9, len(values)))
 
             bars = ax_bar.bar(labels, values, color=colors, edgecolor="none")
             for rank, (bar, (_, row)) in enumerate(zip(bars, top_df.iterrows()), start=1):
                 details = [f"{col}: {self._format_feature_value(row[col])}" for col in feature_cols]
                 tooltip = f"Rank: C{rank}\nPredicted: {row['Predicted']:.6f}\n" + "\n".join(details)
                 self._set_hover_data(bar, text=tooltip)
-            # value labels removed per user request
-            ax_bar.set_title(f"{model_name} - Top 10 Best Combinations", fontsize=12, fontweight="bold")
-            ax_bar.set_xlabel("Combination Rank")
-            ax_bar.set_ylabel("Predicted Target")
-            ax_bar.tick_params(axis="x", rotation=0)
+            
+            ax_bar.set_title(f"{model_name} - Top 10 Best Combinations", fontsize=font_size + 1, fontweight="bold", family=font_family)
+            ax_bar.set_xlabel("Combination Rank", fontsize=font_size, family=font_family)
+            ax_bar.set_ylabel("Predicted Target", fontsize=font_size, family=font_family)
+            ax_bar.set_xticks(np.arange(len(labels)))
+            ax_bar.set_xticklabels(labels, fontsize=font_size - 1, family=font_family)
+            ax_bar.tick_params(axis="both", labelsize=font_size - 1)
 
             ymin = float(np.min(values)) if len(values) else 0.0
             ymax = float(np.max(values)) if len(values) else 1.0
@@ -1622,12 +2548,11 @@ class ModelWorkbenchGUI:
                 pad = (ymax - ymin) * 0.08
                 ax_bar.set_ylim(ymin - pad, ymax + pad)
 
-            # value labels on bars removed per user request
-
             wrap_width = 86 if figure.get_figwidth() >= 15 else 74
             details_text = self._build_top10_details_text(top_df, wrap_width=wrap_width)
             line_count = details_text.count("\n") + 1
-            details_font_size = 8.8 if line_count <= 24 else 8.0
+            details_font_size = (font_size - 1.2) if line_count <= 24 else (font_size - 2.0)
+            details_font_size = max(details_font_size, 7.0)
 
             ax_text.axis("off")
             ax_text.text(
@@ -1637,6 +2562,7 @@ class ModelWorkbenchGUI:
                 va="center",
                 ha="left",
                 fontsize=details_font_size,
+                family=font_family,
                 transform=ax_text.transAxes,
                 bbox=dict(boxstyle="round,pad=0.5", facecolor="#f7f7f7", edgecolor="#444444", alpha=1.0),
             )
@@ -1648,20 +2574,30 @@ class ModelWorkbenchGUI:
         cols = 1 if n == 1 else 2
         rows = int(math.ceil(n / cols))
 
+        if palette == "Default":
+            bar_color = "#3d8ec9"
+        elif palette == "Grayscale":
+            bar_color = "#666666"
+        else:
+            try:
+                bar_color = plt.get_cmap(palette.lower())(0.6)
+            except Exception:
+                bar_color = "#3d8ec9"
+
         for idx, model_name in enumerate(model_names, start=1):
             ax = figure.add_subplot(rows, cols, idx)
             top_df = self.top_combinations[model_name].sort_values("Predicted", ascending=False).reset_index(drop=True)
             ranks = [f"Top {rank}" for rank in range(1, len(top_df) + 1)]
             values = top_df["Predicted"].to_numpy(dtype=float)[::-1]
-            bars = ax.barh(ranks[::-1], values, color="#2a9d8f")
+            bars = ax.barh(ranks[::-1], values, color=bar_color)
             ranked_rows = top_df.iloc[::-1].reset_index(drop=True)
             for rank_name, bar, (_, row) in zip(ranks[::-1], bars, ranked_rows.iterrows()):
                 self._set_hover_data(bar, text=f"{rank_name}\nPredicted: {row['Predicted']:.6f}")
-            # value labels removed per user request
             best_value = float(top_df["Predicted"].iloc[0])
-            ax.set_title(f"{model_name} - Top 10 (Best={best_value:.4f})")
-            ax.set_xlabel("Predicted Target")
-            ax.tick_params(axis="y", labelsize=9)
+            ax.set_title(f"{model_name} - Top 10 (Best={best_value:.4f})", fontsize=font_size + 1, fontweight="bold", family=font_family)
+            ax.set_xlabel("Predicted Target", fontsize=font_size, family=font_family)
+            ax.tick_params(axis="both", labelsize=font_size - 1)
+            ax.set_yticklabels(ranks[::-1], fontsize=font_size - 1, family=font_family)
 
         figure.tight_layout()
 
@@ -1832,23 +2768,62 @@ class ModelWorkbenchGUI:
 
     def _compute_dataset_top10(self, df: pd.DataFrame):
         _, _, target_col, feature_cols = self._get_features_and_target(df)
-        top10 = df.nlargest(10, target_col).reset_index(drop=True)
-        top10_display = top10.copy()
-        top10_display["Combination"] = top10_display.apply(
-            lambda row: self._format_combination_name(row, feature_cols),
-            axis=1,
-        )
-        top10_display = top10_display.rename(columns={target_col: "Actual"})
-        self.dataset_top10 = top10_display
-        self.dataset_target_col = target_col
+
+        # Detect the band/frequency column
+        band_keywords = ["freq", "wavelength", "lambda", "hz", "thz", "nm", "µm"]
+        band_col = None
+        for col in feature_cols:
+            col_lower = col.lower()
+            if any(k in col_lower for k in band_keywords):
+                band_col = col
+                break
+
+        if band_col and len(feature_cols) > 1:
+            # Design configurations are unique sets of other features
+            design_cols = [c for c in feature_cols if c != band_col]
+            
+            # Save band properties
+            self.dataset_band_col = band_col
+            self.dataset_design_cols = design_cols
+            self.dataset_band_values = df[band_col].unique()
+
+            # Group by design columns and calculate the average target across all band points
+            grouped = df.groupby(design_cols)[target_col].mean().reset_index()
+            top10 = grouped.nlargest(10, target_col).reset_index(drop=True)
+
+            top10_display = top10.copy()
+            top10_display["Combination"] = top10_display.apply(
+                lambda row: self._format_combination_name(row, design_cols),
+                axis=1,
+            )
+            top10_display = top10_display.rename(columns={target_col: "Actual"})
+            self.dataset_top10 = top10_display
+            self.dataset_target_col = target_col
+        else:
+            # Fallback to row-level top 10 if no band column found or it's the only feature
+            self.dataset_band_col = None
+            self.dataset_design_cols = feature_cols
+            self.dataset_band_values = np.array([])
+
+            top10 = df.nlargest(10, target_col).reset_index(drop=True)
+            top10_display = top10.copy()
+            top10_display["Combination"] = top10_display.apply(
+                lambda row: self._format_combination_name(row, feature_cols),
+                axis=1,
+            )
+            top10_display = top10_display.rename(columns={target_col: "Actual"})
+            self.dataset_top10 = top10_display
+            self.dataset_target_col = target_col
 
     def _build_dataset_top10_details_text(self, top_df, feature_cols, wrap_width=78):
-        lines = ["Top-10 Dataset Combination Details"]
+        is_band = getattr(self, "dataset_band_col", None) is not None
+        lines = ["Top-10 Dataset Combination Details (Band Average)" if is_band else "Top-10 Dataset Combination Details"]
         for rank, (_, row) in enumerate(top_df.iterrows(), start=1):
             params = ", ".join(
                 f"{col.split('(')[0].strip()}={self._format_feature_value(row[col])}" for col in feature_cols
             )
-            line = f"C{rank}: {params} | {self.dataset_target_col}={row['Actual']:.4f}"
+            val_text = f"avg y={row['Actual']:.4f}" if is_band else f"{self.dataset_target_col}={row['Actual']:.4f}"
+            line = f"C{rank}: {params} | {val_text}"
             lines.append(textwrap.fill(line, width=wrap_width, subsequent_indent="    "))
         return "\n".join(lines)
 
@@ -1877,18 +2852,34 @@ class ModelWorkbenchGUI:
 
         labels = [f"C{i + 1}" for i in range(len(top_df))]
         values = top_df["Actual"].to_numpy(dtype=float)
-        colors = plt.get_cmap("plasma")(np.linspace(0.15, 0.85, len(values)))
+
+        font_family = self.plot_font_family.get()
+        font_size = float(self.plot_font_size.get()) if self.plot_font_size.get() else 10.0
+        palette = self.plot_color_palette.get()
+
+        cmap_name = "plasma"
+        if palette == "Grayscale":
+            cmap_name = "gray"
+        elif palette in ("Viridis", "Plasma", "Coolwarm"):
+            cmap_name = palette.lower()
+        elif palette == "Set2":
+            cmap_name = "Accent"
+        
+        colors = plt.get_cmap(cmap_name)(np.linspace(0.15, 0.85, len(values)))
 
         bars = ax_bar.bar(labels, values, color=colors, edgecolor="none")
         for rank, (bar, (_, row)) in enumerate(zip(bars, top_df.iterrows()), start=1):
             details = [f"{col}: {self._format_feature_value(row[col])}" for col in feature_cols]
             tooltip = f"Rank: C{rank}\nActual: {row['Actual']:.6f}\n" + "\n".join(details)
             self._set_hover_data(bar, text=tooltip)
-        self._annotate_vertical_bars(ax_bar, bars, fmt="{:.4f}", fontsize=9)
-        ax_bar.set_title(f"Dataset Top 10 - Best {self.dataset_target_col} Values", fontsize=12, fontweight="bold")
-        ax_bar.set_xlabel("Combination Rank")
-        ax_bar.set_ylabel(f"Actual {self.dataset_target_col}")
-        ax_bar.tick_params(axis="x", rotation=0)
+        
+        self._annotate_vertical_bars(ax_bar, bars, fmt="{:.4f}", fontsize=font_size - 1)
+        ax_bar.set_title(f"Dataset Top 10 - Best {self.dataset_target_col} Values", fontsize=font_size + 1, fontweight="bold", family=font_family)
+        ax_bar.set_xlabel("Combination Rank", fontsize=font_size, family=font_family)
+        ax_bar.set_ylabel(f"Actual {self.dataset_target_col}", fontsize=font_size, family=font_family)
+        ax_bar.set_xticks(np.arange(len(labels)))
+        ax_bar.set_xticklabels(labels, fontsize=font_size - 1, family=font_family)
+        ax_bar.tick_params(axis="both", labelsize=font_size - 1)
 
         ymin = float(np.min(values)) if len(values) else 0.0
         ymax = float(np.max(values)) if len(values) else 1.0
@@ -1902,7 +2893,8 @@ class ModelWorkbenchGUI:
         wrap_width = 86 if figure.get_figwidth() >= 15 else 74
         details_text = self._build_dataset_top10_details_text(top_df, feature_cols, wrap_width=wrap_width)
         line_count = details_text.count("\n") + 1
-        details_font_size = 8.8 if line_count <= 24 else 8.0
+        details_font_size = (font_size - 1.2) if line_count <= 24 else (font_size - 2.0)
+        details_font_size = max(details_font_size, 7.0)
 
         ax_text.axis("off")
         ax_text.text(
@@ -1912,6 +2904,7 @@ class ModelWorkbenchGUI:
             va="center",
             ha="left",
             fontsize=details_font_size,
+            family=font_family,
             transform=ax_text.transAxes,
             bbox=dict(boxstyle="round,pad=0.5", facecolor="#FFF8E1", edgecolor="#FF8F00", alpha=1.0),
         )
@@ -2222,18 +3215,91 @@ class ModelWorkbenchGUI:
                 "Residual": y_test.reset_index(drop=True) - pd.Series(y_pred),
             })
 
-            # Update application state
-            if self.metrics_df.empty:
-                self.metrics_df = pd.DataFrame([{
+            # Calculate top 10 combinations metrics too
+            metrics_c10 = None
+            if self.dataset_top10 is not None:
+                try:
+                    df_full = self._load_dataset(self.dataset_path.get())
+                    _, _, _, feature_cols = self._get_features_and_target(df_full)
+                    is_band = getattr(self, "dataset_band_col", None) is not None
+                    y_c10 = self.dataset_top10["Actual"].to_numpy(dtype=float)
+                    if is_band:
+                        band_col = self.dataset_band_col
+                        band_values = self.dataset_band_values
+                        design_cols = self.dataset_design_cols
+                        preds_c10_list = []
+                        for _, row in self.dataset_top10.iterrows():
+                            temp_dict = {col: row[col] for col in design_cols}
+                            temp_df = pd.DataFrame([temp_dict] * len(band_values))
+                            temp_df[band_col] = band_values
+                            temp_df = temp_df[feature_cols]
+                            row_preds = pipeline.predict(temp_df)
+                            preds_c10_list.append(np.mean(row_preds))
+                        preds_c10 = np.array(preds_c10_list)
+                    else:
+                        X_c10 = self.dataset_top10[feature_cols]
+                        preds_c10 = pipeline.predict(X_c10)
+                    metrics_c10 = self._compute_regression_metrics(y_c10, preds_c10)
+                except Exception:
+                    pass
+
+            # Calculate predicted top 10 combinations for the loaded model too
+            try:
+                is_band = getattr(self, "dataset_band_col", None) is not None
+                if is_band:
+                    X_copy = X.copy()
+                    X_copy["Predicted"] = pipeline.predict(X)
+                    grouped = X_copy.groupby(self.dataset_design_cols)["Predicted"].mean().reset_index()
+                    combo_df = grouped.sort_values("Predicted", ascending=False).head(10).reset_index(drop=True)
+                    combo_df["Combination"] = combo_df.apply(
+                        lambda row: self._format_combination_name(row, self.dataset_design_cols),
+                        axis=1,
+                    )
+                    self.top_combinations[name] = combo_df[["Combination", "Predicted"] + self.dataset_design_cols]
+                else:
+                    combo_features = X.drop_duplicates().reset_index(drop=True)
+                    combo_preds = pipeline.predict(combo_features)
+                    combo_df = combo_features.copy()
+                    combo_df["Predicted"] = combo_preds
+                    combo_df = combo_df.sort_values("Predicted", ascending=False).head(10).reset_index(drop=True)
+                    combo_df["Combination"] = combo_df.apply(
+                        lambda row: self._format_combination_name(row, feature_cols),
+                        axis=1,
+                    )
+                    self.top_combinations[name] = combo_df[["Combination", "Predicted"] + feature_cols]
+            except Exception:
+                pass
+
+            # Update metrics_c10_df
+            if metrics_c10 is not None:
+                if not hasattr(self, "metrics_c10_df") or self.metrics_c10_df is None or self.metrics_c10_df.empty:
+                    self.metrics_c10_df = pd.DataFrame([{
+                        "Model": name, "R2": metrics_c10["R2"], "RMSE": metrics_c10["RMSE"], "MSE": metrics_c10["MSE"], "MAE": metrics_c10["MAE"]
+                    }])
+                else:
+                    self.metrics_c10_df = self.metrics_c10_df[self.metrics_c10_df["Model"] != name]
+                    new_row_c10 = pd.DataFrame([{
+                        "Model": name, "R2": metrics_c10["R2"], "RMSE": metrics_c10["RMSE"], "MSE": metrics_c10["MSE"], "MAE": metrics_c10["MAE"]
+                    }])
+                    self.metrics_c10_df = pd.concat([self.metrics_c10_df, new_row_c10], ignore_index=True).sort_values("R2", ascending=False)
+
+            # Update metrics_test_df
+            if not hasattr(self, "metrics_test_df") or self.metrics_test_df is None or self.metrics_test_df.empty:
+                self.metrics_test_df = pd.DataFrame([{
                     "Model": name, "R2": metrics["R2"], "RMSE": metrics["RMSE"], "MSE": metrics["MSE"], "MAE": metrics["MAE"]
                 }])
             else:
-                # Remove if already exists with same name
-                self.metrics_df = self.metrics_df[self.metrics_df["Model"] != name]
-                new_row = pd.DataFrame([{
+                self.metrics_test_df = self.metrics_test_df[self.metrics_test_df["Model"] != name]
+                new_row_test = pd.DataFrame([{
                     "Model": name, "R2": metrics["R2"], "RMSE": metrics["RMSE"], "MSE": metrics["MSE"], "MAE": metrics["MAE"]
                 }])
-                self.metrics_df = pd.concat([self.metrics_df, new_row], ignore_index=True).sort_values("R2", ascending=False)
+                self.metrics_test_df = pd.concat([self.metrics_test_df, new_row_test], ignore_index=True).sort_values("R2", ascending=False)
+
+            # Update self.metrics_df
+            if self.evaluation_dataset_var.get() == "Actual Top 10 Combinations" and hasattr(self, "metrics_c10_df") and not self.metrics_c10_df.empty:
+                self.metrics_df = self.metrics_c10_df.copy()
+            else:
+                self.metrics_df = self.metrics_test_df.copy()
             
             self.prediction_frames[name] = pred_df
             
@@ -2242,6 +3308,7 @@ class ModelWorkbenchGUI:
             self._update_results_table()
             self._update_metric_charts()
             self._update_prediction_chart()
+            self._update_combination_chart()
             
         except Exception as e:
             messagebox.showwarning("Inference Warning", f"Model loaded but could not run on current data:\n{str(e)}\n\nEnsure features match.")
@@ -2294,109 +3361,236 @@ class ModelWorkbenchGUI:
         mse_vals = plot_df["MSE"].to_numpy(dtype=float)
         mae_vals = plot_df["MAE"].to_numpy(dtype=float)
 
+        # Parse axis limits for Ratio subplots
+        r2_xmin = self._parse_axis_limit(self.ratio_r2_xmin_var.get())
+        r2_xmax = self._parse_axis_limit(self.ratio_r2_xmax_var.get())
+        r2_ymin = self._parse_axis_limit(self.ratio_r2_ymin_var.get())
+        r2_ymax = self._parse_axis_limit(self.ratio_r2_ymax_var.get())
+
+        rmse_xmin = self._parse_axis_limit(self.ratio_rmse_xmin_var.get())
+        rmse_xmax = self._parse_axis_limit(self.ratio_rmse_xmax_var.get())
+        rmse_ymin = self._parse_axis_limit(self.ratio_rmse_ymin_var.get())
+        rmse_ymax = self._parse_axis_limit(self.ratio_rmse_ymax_var.get())
+
+        mse_xmin = self._parse_axis_limit(self.ratio_mse_xmin_var.get())
+        mse_xmax = self._parse_axis_limit(self.ratio_mse_xmax_var.get())
+        mse_ymin = self._parse_axis_limit(self.ratio_mse_ymin_var.get())
+        mse_ymax = self._parse_axis_limit(self.ratio_mse_ymax_var.get())
+
+        mae_xmin = self._parse_axis_limit(self.ratio_mae_xmin_var.get())
+        mae_xmax = self._parse_axis_limit(self.ratio_mae_xmax_var.get())
+        mae_ymin = self._parse_axis_limit(self.ratio_mae_ymin_var.get())
+        mae_ymax = self._parse_axis_limit(self.ratio_mae_ymax_var.get())
+
+        font_family = self.plot_font_family.get()
+        font_size = float(self.plot_font_size.get()) if self.plot_font_size.get() else 10.0
+
+        ratio_highlight_ratio = self.ratio_highlight_ratio_var.get()
+        ratio_highlight_color = self.ratio_highlight_color_var.get().lower()
+
+        # Generate colors for bars based on highlight
+        colors_r2 = []
+        for r in ratio_labels:
+            if ratio_highlight_ratio != "None" and r == ratio_highlight_ratio and ratio_highlight_color != "none":
+                colors_r2.append(ratio_highlight_color)
+            else:
+                colors_r2.append(self._get_metric_color(0))
+
+        colors_rmse = []
+        for r in ratio_labels:
+            if ratio_highlight_ratio != "None" and r == ratio_highlight_ratio and ratio_highlight_color != "none":
+                colors_rmse.append(ratio_highlight_color)
+            else:
+                colors_rmse.append(self._get_metric_color(1))
+
+        colors_mse = []
+        for r in ratio_labels:
+            if ratio_highlight_ratio != "None" and r == ratio_highlight_ratio and ratio_highlight_color != "none":
+                colors_mse.append(ratio_highlight_color)
+            else:
+                colors_mse.append(self._get_metric_color(2))
+
+        colors_mae = []
+        for r in ratio_labels:
+            if ratio_highlight_ratio != "None" and r == ratio_highlight_ratio and ratio_highlight_color != "none":
+                colors_mae.append(ratio_highlight_color)
+            else:
+                colors_mae.append(self._get_metric_color(3))
+
         if self.ratio_mode_var.get() == "2D":
+            outer = figure.add_gridspec(2, 1, height_ratios=[4.9, 1.3], hspace=0.18)
+            top = outer[0].subgridspec(2, 2, wspace=0.28, hspace=0.32)
+            ax1 = figure.add_subplot(top[0, 0])
+            ax2 = figure.add_subplot(top[0, 1])
+            ax3 = figure.add_subplot(top[1, 0])
+            ax4 = figure.add_subplot(top[1, 1])
+            info_ax = figure.add_subplot(outer[1, 0])
+            info_ax.set_facecolor("#f6f6f6")
+            info_ax.set_xticks([])
+            info_ax.set_yticks([])
+            for spine in info_ax.spines.values():
+                spine.set_visible(True)
+                spine.set_edgecolor("#666666")
+                spine.set_linewidth(0.9)
+
             x = np.arange(len(ratio_labels), dtype=float)
-            metrics = [
-                ("R2", r2_vals, "#3d8ec9"),
-                ("RMSE", rmse_vals, "#f4a259"),
-                ("MSE", mse_vals, "#74c476"),
-                ("MAE", mae_vals, "#9c89b8"),
-            ]
-            width = 0.18
-            
-            ax = figure.add_subplot(111)
-            # best ratio highlight removed for research suitability
-            all_vals = np.concatenate([r2_vals, rmse_vals, mse_vals, mae_vals])
-            y_top = max(float(np.max(all_vals)) * 1.35, 1.0)
-            ax.set_ylim(0.0, y_top)
-            for idx, (metric_name, metric_vals, metric_color) in enumerate(metrics):
-                offset = (idx - 1.5) * width
-                bars = ax.bar(x + offset, metric_vals, width=width, color=metric_color, label=metric_name, edgecolor="#2b2b2b", linewidth=0.25)
-                self._annotate_vertical_bars(ax, bars)
-                self._set_hover_data(
-                    bars,
-                    texts=[f"Ratio: {label}\n{metric_name}: {value:.6f}" for label, value in zip(ratio_labels, metric_vals)],
-                )
+            width = 0.5
 
-            ax.set_title(f"Ratio Analysis - {selected_model}", fontweight="bold", pad=10)
-            ax.set_xlabel("Train-Test Ratio")
-            ax.set_ylabel("Metric Value")
+            # Subplot 1: R2
+            bars_r2 = ax1.bar(x, r2_vals, width=width, color=colors_r2, edgecolor="#2b2b2b", linewidth=0.25)
+            self._annotate_vertical_bars(ax1, bars_r2, fontsize=font_size - 2)
+            self._set_hover_data(bars_r2, texts=[f"Ratio: {label}\nR2: {value:.6f}" for label, value in zip(ratio_labels, r2_vals)])
+            ax1.set_title("R² Score vs Ratio", fontweight="bold", fontsize=font_size + 1, family=font_family)
+            ax1.set_xticks(x)
+            ax1.set_xticklabels(ratio_labels, fontsize=font_size - 1, family=font_family)
+            ax1.tick_params(axis="y", labelsize=font_size - 1)
+            ax1.grid(axis="y", linestyle="--", alpha=0.22)
 
-            ax.set_xticks(x)
-            ax.set_xticklabels(ratio_labels)
-            y_top = max(float(np.max(all_vals)) * 1.2, 1.0)
-            ax.set_ylim(0.0, y_top)
+            # Subplot 2: RMSE
+            bars_rmse = ax2.bar(x, rmse_vals, width=width, color=colors_rmse, edgecolor="#2b2b2b", linewidth=0.25)
+            self._annotate_vertical_bars(ax2, bars_rmse, fontsize=font_size - 2)
+            self._set_hover_data(bars_rmse, texts=[f"Ratio: {label}\nRMSE: {value:.6f}" for label, value in zip(ratio_labels, rmse_vals)])
+            ax2.set_title("RMSE vs Ratio", fontweight="bold", fontsize=font_size + 1, family=font_family)
+            ax2.set_xticks(x)
+            ax2.set_xticklabels(ratio_labels, fontsize=font_size - 1, family=font_family)
+            ax2.tick_params(axis="y", labelsize=font_size - 1)
+            ax2.grid(axis="y", linestyle="--", alpha=0.22)
 
-            ax.grid(axis="both", linestyle="--", alpha=0.25)
-            ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5))
+            # Subplot 3: MSE
+            bars_mse = ax3.bar(x, mse_vals, width=width, color=colors_mse, edgecolor="#2b2b2b", linewidth=0.25)
+            self._annotate_vertical_bars(ax3, bars_mse, fontsize=font_size - 2)
+            self._set_hover_data(bars_mse, texts=[f"Ratio: {label}\nMSE: {value:.6f}" for label, value in zip(ratio_labels, mse_vals)])
+            ax3.set_title("MSE vs Ratio", fontweight="bold", fontsize=font_size + 1, family=font_family)
+            ax3.set_xticks(x)
+            ax3.set_xticklabels(ratio_labels, fontsize=font_size - 1, family=font_family)
+            ax3.tick_params(axis="y", labelsize=font_size - 1)
+            ax3.grid(axis="y", linestyle="--", alpha=0.22)
 
-            figure.tight_layout(rect=[0, 0, 0.85, 1])
+            # Subplot 4: MAE
+            bars_mae = ax4.bar(x, mae_vals, width=width, color=colors_mae, edgecolor="#2b2b2b", linewidth=0.25)
+            self._annotate_vertical_bars(ax4, bars_mae, fontsize=font_size - 2)
+            self._set_hover_data(bars_mae, texts=[f"Ratio: {label}\nMAE: {value:.6f}" for label, value in zip(ratio_labels, mae_vals)])
+            ax4.set_title("MAE vs Ratio", fontweight="bold", fontsize=font_size + 1, family=font_family)
+            ax4.set_xticks(x)
+            ax4.set_xticklabels(ratio_labels, fontsize=font_size - 1, family=font_family)
+            ax4.tick_params(axis="y", labelsize=font_size - 1)
+            ax4.grid(axis="y", linestyle="--", alpha=0.22)
+
+            # Apply manual limits to 2D
+            if r2_xmin is not None and r2_xmax is not None and r2_xmin < r2_xmax:
+                ax1.set_xlim(r2_xmin, r2_xmax)
+            if r2_ymin is not None and r2_ymax is not None and r2_ymin < r2_ymax:
+                ax1.set_ylim(r2_ymin, r2_ymax)
+
+            if rmse_xmin is not None and rmse_xmax is not None and rmse_xmin < rmse_xmax:
+                ax2.set_xlim(rmse_xmin, rmse_xmax)
+            if rmse_ymin is not None and rmse_ymax is not None and rmse_ymin < rmse_ymax:
+                ax2.set_ylim(rmse_ymin, rmse_ymax)
+
+            if mse_xmin is not None and mse_xmax is not None and mse_xmin < mse_xmax:
+                ax3.set_xlim(mse_xmin, mse_xmax)
+            if mse_ymin is not None and mse_ymax is not None and mse_ymin < mse_ymax:
+                ax3.set_ylim(mse_ymin, mse_ymax)
+
+            if mae_xmin is not None and mae_xmax is not None and mae_xmin < mae_xmax:
+                ax4.set_xlim(mae_xmin, mae_xmax)
+            if mae_ymin is not None and mae_ymax is not None and mae_ymin < mae_ymax:
+                ax4.set_ylim(mae_ymin, mae_ymax)
+
+            self._draw_ratio_reference_box(info_ax, font_family=font_family, font_size=font_size)
+            figure.subplots_adjust(left=0.05, right=0.98, top=0.92, bottom=0.08)
+            try:
+                figure.tight_layout()
+            except Exception:
+                pass
             return
 
-        ax = figure.add_subplot(111, projection="3d")
+        # 3D separate subplots in a 2x2 grid (satisfies "make this changes in 3D part also")
+        outer = figure.add_gridspec(2, 1, height_ratios=[4.9, 1.3], hspace=0.18)
+        top = outer[0].subgridspec(2, 2, wspace=0.28, hspace=0.24)
+        ax1 = figure.add_subplot(top[0, 0], projection="3d")
+        ax2 = figure.add_subplot(top[0, 1], projection="3d")
+        ax3 = figure.add_subplot(top[1, 0], projection="3d")
+        ax4 = figure.add_subplot(top[1, 1], projection="3d")
+        info_ax = figure.add_subplot(outer[1, 0])
+        info_ax.set_facecolor("#f6f6f6")
+        info_ax.set_xticks([])
+        info_ax.set_yticks([])
+        for spine in info_ax.spines.values():
+            spine.set_visible(True)
+            spine.set_edgecolor("#666666")
+            spine.set_linewidth(0.9)
 
-        x = np.arange(len(ratio_labels), dtype=float)
-        dx = np.full(len(ratio_labels), 0.38, dtype=float)
-        dy = np.full(len(ratio_labels), 0.35, dtype=float)
-        metric_specs = [
-            ("R2", r2_vals, "#2a9d8f", 0.0),
-            ("RMSE", rmse_vals, "#e76f51", 1.0),
-            ("MSE", mse_vals, "#3a86ff", 2.0),
-            ("MAE", mae_vals, "#8338ec", 3.0),
-        ]
+        self._plot_3d_metric_bars(
+            ax1, ratio_labels, r2_vals, -1, "Blues", "R² Score vs Ratio (3D)", "R² Score",
+            xmin=r2_xmin, xmax=r2_xmax, zmin=r2_ymin, zmax=r2_ymax, custom_colors=colors_r2
+        )
+        self._plot_3d_metric_bars(
+            ax2, ratio_labels, rmse_vals, -1, "Oranges", "RMSE vs Ratio (3D)", "RMSE",
+            xmin=rmse_xmin, xmax=rmse_xmax, zmin=rmse_ymin, zmax=rmse_ymax, custom_colors=colors_rmse
+        )
+        self._plot_3d_metric_bars(
+            ax3, ratio_labels, mse_vals, -1, "Greens", "MSE vs Ratio (3D)", "MSE",
+            xmin=mse_xmin, xmax=mse_xmax, zmin=mse_ymin, zmax=mse_ymax, custom_colors=colors_mse
+        )
+        self._plot_3d_metric_bars(
+            ax4, ratio_labels, mae_vals, -1, "Purples", "MAE vs Ratio (3D)", "MAE",
+            xmin=mae_xmin, xmax=mae_xmax, zmin=mae_ymin, zmax=mae_ymax, custom_colors=colors_mae
+        )
 
-        for metric_name, metric_vals, metric_color, y_base in metric_specs:
-            ax.bar3d(
-                x,
-                np.full(len(x), y_base),
-                np.zeros(len(x)),
-                dx,
-                dy,
-                metric_vals,
-                color=metric_color,
-                edgecolor="#222222",
-                alpha=0.92,
-            )
+        self._draw_ratio_reference_box(info_ax, font_family=font_family, font_size=font_size)
+        figure.subplots_adjust(left=0.02, right=0.99, top=0.92, bottom=0.08)
         try:
-            for metric_name, metric_vals, _metric_color, y_base in metric_specs:
-                hover = ax.scatter(
-                    x + dx / 2,
-                    np.full(len(x), y_base) + dy / 2,
-                    metric_vals,
-                    s=40,
-                    c="none",
-                    alpha=0.0,
-                )
-                self._set_hover_data(
-                    hover,
-                    texts=[f"Ratio: {label}\n{metric_name}: {value:.6f}" for label, value in zip(ratio_labels, metric_vals)],
-                )
+            figure.tight_layout()
+        except Exception:
+            pass
         except Exception:
             pass
 
-        ax.set_title(f"Ratio Analysis - {selected_model}", fontweight="bold", pad=16)
-        ax.set_xlabel("Train-Test Ratio", labelpad=10)
-        ax.set_ylabel("Metrics", labelpad=10)
-        ax.set_zlabel("Values", labelpad=10)
+    def _draw_ratio_reference_box(self, ax, font_family=None, font_size=None):
+        if font_family is None:
+            font_family = self.plot_font_family.get()
+        if font_size is None:
+            font_size = float(self.plot_font_size.get()) if self.plot_font_size.get() else 10.0
 
-        ax.set_xticks(x + dx / 2)
-        ax.set_xticklabels(ratio_labels)
-        ax.set_yticks([0 + dy[0] / 2, 1 + dy[0] / 2, 2 + dy[0] / 2, 3 + dy[0] / 2])
-        ax.set_yticklabels(["R2", "RMSE", "MSE", "MAE"])
-        ax.view_init(elev=23, azim=-58)
+        items = []
+        if self.ratio_best_r2_row is not None:
+            items.append(f"Best Ratio by R²: {self.ratio_best_r2_row['Ratio']} | Value = {self.ratio_best_r2_row['R2']:.6f}")
+        if self.ratio_best_rmse_row is not None:
+            items.append(f"Best Ratio by RMSE: {self.ratio_best_rmse_row['Ratio']} | Value = {self.ratio_best_rmse_row['RMSE']:.6f}")
+        if self.ratio_best_mse_row is not None:
+            items.append(f"Best Ratio by MSE: {self.ratio_best_mse_row['Ratio']} | Value = {self.ratio_best_mse_row['MSE']:.6f}")
+        if self.ratio_best_mae_row is not None:
+            items.append(f"Best Ratio by MAE: {self.ratio_best_mae_row['Ratio']} | Value = {self.ratio_best_mae_row['MAE']:.6f}")
 
-        from matplotlib.patches import Patch
-        legend_handles = [
-            Patch(facecolor="#2a9d8f", edgecolor="#222222", label="R2"),
-            Patch(facecolor="#e76f51", edgecolor="#222222", label="RMSE"),
-            Patch(facecolor="#3a86ff", edgecolor="#222222", label="MSE"),
-            Patch(facecolor="#8338ec", edgecolor="#222222", label="MAE"),
-        ]
-        ax.legend(handles=legend_handles, loc="center left", bbox_to_anchor=(1.05, 0.5))
+        if not items:
+            items = ["Run ratio analysis to see the best train-test ratio for each metric."]
 
-        z_max = max(float(np.max(r2_vals)), float(np.max(rmse_vals)), float(np.max(mse_vals)), float(np.max(mae_vals)))
-        ax.set_zlim(0, max(z_max * 1.15, 1.0))
-        figure.subplots_adjust(left=0.05, right=0.82, top=0.92, bottom=0.08)
+        ax.text(
+            0.015,
+            0.97,
+            "Ratio Performance Summary (Best Ratios)",
+            ha="left",
+            va="top",
+            fontsize=font_size,
+            fontweight="bold",
+            family=font_family,
+            color="#222222",
+            transform=ax.transAxes,
+        )
+
+        ax.text(
+            0.015,
+            0.70,
+            "\n".join(items),
+            ha="left",
+            va="top",
+            fontsize=font_size - 1,
+            family=font_family,
+            color="#111111",
+            transform=ax.transAxes,
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="#ffffff", edgecolor="#bbbbbb", alpha=1.0),
+        )
 
     def _update_ratio_results_table(self):
         for item in self.ratio_results_table.get_children():
@@ -2448,6 +3642,7 @@ class ModelWorkbenchGUI:
             self.progress_var.set(25)
 
             records = []
+            records_c10 = []
             predictions = {}
             top_combinations = {}
 
@@ -2467,22 +3662,79 @@ class ModelWorkbenchGUI:
                 })
                 predictions[model_name] = pred_df
 
-                combo_features = X.drop_duplicates().reset_index(drop=True)
-                combo_preds = pipeline.predict(combo_features)
-                combo_df = combo_features.copy()
-                combo_df["Predicted"] = combo_preds
-                combo_df = combo_df.sort_values("Predicted", ascending=False).head(10).reset_index(drop=True)
-                combo_df["Combination"] = combo_df.apply(
-                    lambda row: self._format_combination_name(row, feature_cols),
-                    axis=1,
-                )
-                top_combinations[model_name] = combo_df[["Combination", "Predicted"] + feature_cols]
+                # Evaluate specifically on actual top 10 combinations
+                if self.dataset_top10 is not None:
+                    try:
+                        is_band = getattr(self, "dataset_band_col", None) is not None
+                        y_c10 = self.dataset_top10["Actual"].to_numpy(dtype=float)
+                        if is_band:
+                            band_col = self.dataset_band_col
+                            band_values = self.dataset_band_values
+                            design_cols = self.dataset_design_cols
+                            preds_c10_list = []
+                            for _, row in self.dataset_top10.iterrows():
+                                temp_dict = {col: row[col] for col in design_cols}
+                                temp_df = pd.DataFrame([temp_dict] * len(band_values))
+                                temp_df[band_col] = band_values
+                                temp_df = temp_df[feature_cols]
+                                row_preds = pipeline.predict(temp_df)
+                                preds_c10_list.append(np.mean(row_preds))
+                            preds_c10 = np.array(preds_c10_list)
+                        else:
+                            X_c10 = self.dataset_top10[feature_cols]
+                            preds_c10 = pipeline.predict(X_c10)
+
+                        metrics_c10 = self._compute_regression_metrics(y_c10, preds_c10)
+                        records_c10.append({
+                            "Model": model_name,
+                            "R2": metrics_c10["R2"],
+                            "RMSE": metrics_c10["RMSE"],
+                            "MSE": metrics_c10["MSE"],
+                            "MAE": metrics_c10["MAE"],
+                        })
+                    except Exception:
+                        pass
+
+                is_band = getattr(self, "dataset_band_col", None) is not None
+                if is_band:
+                    # Vectorized band-averaged prediction for unique design configurations
+                    X_copy = X.copy()
+                    X_copy["Predicted"] = pipeline.predict(X)
+                    grouped = X_copy.groupby(self.dataset_design_cols)["Predicted"].mean().reset_index()
+                    combo_df = grouped.sort_values("Predicted", ascending=False).head(10).reset_index(drop=True)
+                    combo_df["Combination"] = combo_df.apply(
+                        lambda row: self._format_combination_name(row, self.dataset_design_cols),
+                        axis=1,
+                    )
+                    top_combinations[model_name] = combo_df[["Combination", "Predicted"] + self.dataset_design_cols]
+                else:
+                    combo_features = X.drop_duplicates().reset_index(drop=True)
+                    combo_preds = pipeline.predict(combo_features)
+                    combo_df = combo_features.copy()
+                    combo_df["Predicted"] = combo_preds
+                    combo_df = combo_df.sort_values("Predicted", ascending=False).head(10).reset_index(drop=True)
+                    combo_df["Combination"] = combo_df.apply(
+                        lambda row: self._format_combination_name(row, feature_cols),
+                        axis=1,
+                    )
+                    top_combinations[model_name] = combo_df[["Combination", "Predicted"] + feature_cols]
                 
                 # update progress
                 prog = 25 + (i + 1) / total_models * 60
                 self.progress_var.set(prog)
 
-            self.metrics_df = pd.DataFrame(records).sort_values("R2", ascending=False).reset_index(drop=True)
+            self.metrics_test_df = pd.DataFrame(records).sort_values("R2", ascending=False).reset_index(drop=True)
+            if records_c10:
+                self.metrics_c10_df = pd.DataFrame(records_c10).sort_values("R2", ascending=False).reset_index(drop=True)
+            else:
+                self.metrics_c10_df = pd.DataFrame()
+
+            # Set active metrics_df based on evaluation toggle
+            if self.evaluation_dataset_var.get() == "Actual Top 10 Combinations" and not self.metrics_c10_df.empty:
+                self.metrics_df = self.metrics_c10_df.copy()
+            else:
+                self.metrics_df = self.metrics_test_df.copy()
+
             self.prediction_frames = predictions
             self.top_combinations = top_combinations
 
@@ -2500,6 +3752,9 @@ class ModelWorkbenchGUI:
                 self.ratio_model_combo['values'] = list(ratio_df["Model"].unique())
                 if not self.ratio_model_var.get() or self.ratio_model_var.get() not in self.ratio_model_combo['values']:
                     self.ratio_model_var.set(str(ratio_df.iloc[0]["Model"]))
+
+            if hasattr(self, 'ratio_highlight_combo'):
+                self.ratio_highlight_combo['values'] = ["None"] + list(ratio_df["Ratio"].unique())
 
             self.progress_var.set(95)
             self.status_text.set("Updating UI...")
